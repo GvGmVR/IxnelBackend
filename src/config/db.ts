@@ -1,12 +1,19 @@
-import { astraDb } from '../lib/astra';
+import { Pool } from 'pg';
 
-export const connectDB = async (): Promise<void> => {
-  try {
-    // Astra DB client is initialized in lib/astra.ts, but let's verify connectivity
-    const collections = await astraDb.listCollections();
-    console.log(`✅ Astra DB connected. Collections: ${collections.length}`);
-  } catch (error) {
-    console.error('❌ Astra DB connection error:', error);
-    console.log('⚠️ Ensure ASTRA_DB_API_ENDPOINT and ASTRA_DB_APPLICATION_TOKEN are correct.');
+export const pool = new Pool({
+  host     : process.env.DB_HOST     || 'localhost',
+  port     : parseInt(process.env.DB_PORT || '5432'),
+  database : process.env.DB_NAME     || 'your_project_db',
+  user     : process.env.DB_USER     || 'your_project_user',
+  password : process.env.DB_PASSWORD || '',
+});
+
+// ── Test connection on startup ─────────────────────────────────────────────
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('❌ Database connection failed:', err.message);
+  } else {
+    console.log('✅ Database connected successfully');
+    release();
   }
-};
+});

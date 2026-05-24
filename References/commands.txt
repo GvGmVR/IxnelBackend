@@ -1,0 +1,4 @@
+psql -h localhost -U superadmin -d animationproject
+
+
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"

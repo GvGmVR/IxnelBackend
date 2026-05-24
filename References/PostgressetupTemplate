@@ -1,0 +1,35 @@
+-- Create database
+CREATE DATABASE animationproject;
+
+-- Create user
+CREATE USER superadmin WITH PASSWORD 'StrongPassword123';
+
+-- Grant DB connection
+GRANT CONNECT ON DATABASE animationproject TO superadmin;
+
+-- Grant DB privileges
+GRANT ALL PRIVILEGES ON DATABASE animationproject TO superadmin;
+
+-- Make user owner of database (VERY IMPORTANT)
+ALTER DATABASE animationproject OWNER TO superadmin;
+
+-- Connect to DB
+\c animationproject
+
+-- Grant schema permissions
+GRANT USAGE, CREATE ON SCHEMA public TO superadmin;
+
+-- Make schema owner (IMPORTANT FOR MIGRATIONS)
+ALTER SCHEMA public OWNER TO superadmin;
+
+-- Future tables permissions
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON TABLES TO superadmin;
+
+-- Future sequences permissions
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON SEQUENCES TO superadmin;
+
+-- Future functions permissions
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON FUNCTIONS TO superadmin;

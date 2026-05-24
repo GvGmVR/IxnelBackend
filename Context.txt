@@ -1,0 +1,494 @@
+Below is a refined version of my schema + operational logic in the same style as your handwritten notes, but structured enough that you can directly translate it into PostgreSQL tables and backend implementation.
+
+---
+
+# DATABASE STRUCTURE
+
+---
+
+# 1. auth_users
+
+Purpose:
+
+* Authentication only
+* OAuth / email-password isolated from business profile data
+* Future-proofing authentication providers
+
+---
+
+## Table: auth_users
+
+| Field            | Type          | Notes                     |
+| ---------------- | ------------- | ------------------------- |
+| id               | UUID          | Primary key               |
+| email            | TEXT UNIQUE   | login email               |
+| password_hash    | TEXT nullable | nullable for OAuth        |
+| auth_provider    | ENUM          | `(local, google, github)` |
+| provider_user_id | TEXT nullable | OAuth provider id         |
+| email_verified   | BOOLEAN       | default false             |
+| created_at       | TIMESTAMP     |                           |
+| updated_at       | TIMESTAMP     |                           |
+
+---
+
+## Conditions / Logic
+
+### Local signup
+
+```text id="9a4mb8"
+email + password required
+password_hash stored
+```
+
+---
+
+### OAuth signup
+
+```text id="xbk6q7"
+password_hash = NULL
+provider_user_id required
+```
+
+---
+
+### Email uniqueness
+
+```text id="7qohjt"
+same email cannot exist twice
+even across providers
+```
+
+---
+
+### If gmail/google signin
+
+```text id="6z4n8v"
+derive initial username from email prefix
+BUT
+still ask user_type separately
+(company / individual)
+```
+
+---
+
+# 2. profiles
+
+Purpose:
+
+* Actual user/company/business data
+* Credits
+* Public identity
+* AI usage tracking linkage
+
+---
+
+## ENUM: user_type_enum
+
+```text id="n8jlwm"
+individual
+company
+```
+
+---
+
+## Table: profiles
+
+| Field              | Type          | Notes                     |
+| ------------------ | ------------- | ------------------------- |
+| id                 | UUID          | Primary key               |
+| auth_user_id       | UUID FK       | references auth_users(id) |
+| username           | TEXT UNIQUE   | visible name              |
+| user_type          | ENUM          | company / individual      |
+| company_name       | TEXT nullable | only for company          |
+| credits            | INTEGER       | usable credits            |
+| reserved_credits   | INTEGER       | locked during processing  |
+| total_credits_used | INTEGER       | analytics                 |
+| is_blocked         | BOOLEAN       | admin/user restriction    |
+| created_at         | TIMESTAMP     |                           |
+| updated_at         | TIMESTAMP     |                           |
+
+---
+
+## Conditions / Logic
+
+---
+
+### Company validation
+
+```text id="9l5d2t"
+IF user_type = company
+THEN company_name required
+```
+
+---
+
+### Individual validation
+
+```text id="mev53d"
+IF user_type = individual
+THEN company_name = NULL
+```
+
+---
+
+### Initial signup credits
+
+```text id="q4q4kw"
+new users receive free credits initially
+```
+
+Example:
+
+```text id="rt88nh"
+credits = 50
+reserved_credits = 0
+```
+
+---
+
+### Credit availability logic
+
+Available credits:
+
+```text id="5v1jlwm"
+available_credits =
+credits - reserved_credits
+```
+
+---
+
+### Blocking condition
+
+```text id="y1tkk6"
+IF available_credits < minimum_job_cost
+THEN
+job creation blocked
+```
+
+---
+
+# 3. credit_transactions
+
+Purpose:
+
+* Proper credit history
+* Avoid using "previous_credits"
+* Full accounting trail
+
+---
+
+## ENUM: credit_transaction_type
+
+```text id="nmv9w4"
+free_grant
+purchase
+job_deduction
+refund
+admin_adjustment
+reservation
+reservation_release
+```
+
+---
+
+## Table: credit_transactions
+
+| Field            | Type          |
+| ---------------- | ------------- |
+| id               | UUID          |
+| profile_id       | UUID FK       |
+| transaction_type | ENUM          |
+| amount           | INTEGER       |
+| balance_after    | INTEGER       |
+| reference_job_id | UUID nullable |
+| notes            | TEXT          |
+| created_at       | TIMESTAMP     |
+
+---
+
+## Logic
+
+---
+
+### Free signup credits
+
+```text id="tr2w0e"
+transaction_type = free_grant
+```
+
+---
+
+### When job initiated
+
+```text id="db65p8"
+reserved_credits += job_cost
+```
+
+Transaction:
+
+```text id="sqkruq"
+transaction_type = reservation
+```
+
+---
+
+### On successful completion
+
+```text id="g1dwyf"
+reserved_credits -= reserved_amount
+credits -= reserved_amount
+```
+
+Transaction:
+
+```text id="fjlwm4"
+transaction_type = job_deduction
+```
+
+---
+
+### On failure
+
+```text id="6zjlwm"
+reserved_credits released back
+```
+
+Transaction:
+
+```text id="jlwmf7"
+transaction_type = reservation_release
+```
+
+---
+
+# 4. jobs
+
+Purpose:
+
+* Represents backend AI processing tasks
+
+---
+
+## ENUM: job_status_enum
+
+```text id="y1g7sp"
+queued
+initiated
+processing
+completed
+failed
+blocked
+cancelled
+```
+
+---
+
+## Table: jobs
+
+| Field              | Type               | Notes                   |
+| ------------------ | ------------------ | ----------------------- |
+| id                 | UUID               | Primary key             |
+| profile_id         | UUID FK            | references profiles(id) |
+| input_path         | TEXT               | uploaded asset location |
+| output_path        | TEXT nullable      | generated result        |
+| status             | ENUM               | lifecycle               |
+| job_cost           | INTEGER            | credits consumed        |
+| model_version      | TEXT               | reproducibility         |
+| priority           | INTEGER            | queue priority          |
+| processing_time_ms | INTEGER nullable   | analytics               |
+| error_message      | TEXT nullable      | failure debugging       |
+| created_at         | TIMESTAMP          |                         |
+| started_at         | TIMESTAMP nullable |                         |
+| completed_at       | TIMESTAMP nullable |                         |
+| expires_at         | TIMESTAMP nullable | cleanup policy          |
+
+---
+
+# Job Flow Logic
+
+---
+
+## 1. User submits AI request
+
+```text id="e3kn4t"
+create job
+status = queued
+```
+
+---
+
+## 2. Credit validation
+
+```text id="p6cjlwm"
+IF available_credits >= job_cost
+    reserve credits
+ELSE
+    status = blocked
+```
+
+---
+
+## 3. Worker picks job
+
+```text id="m0ttkp"
+status:
+queued -> initiated -> processing
+```
+
+---
+
+## 4. On success
+
+```text id="c7pn2r"
+generate output
+store output_path
+deduct credits permanently
+status = completed
+```
+
+---
+
+## 5. On failure
+
+```text id="8l7mkk"
+release reserved credits
+store error_message
+status = failed
+```
+
+---
+
+# 5. payments
+
+Purpose:
+
+* Track real money purchases/recharges
+
+---
+
+## ENUM: payment_status_enum
+
+```text id="knc6n7"
+pending
+success
+failed
+refunded
+```
+
+---
+
+## ENUM: payment_provider_enum
+
+```text id="jlwmk9"
+razorpay
+stripe
+paypal
+manual
+```
+
+---
+
+## Table: payments
+
+| Field                   | Type               |
+| ----------------------- | ------------------ |
+| id                      | UUID               |
+| profile_id              | UUID FK            |
+| amount                  | DECIMAL            |
+| credits_added           | INTEGER            |
+| payment_provider        | ENUM               |
+| payment_status          | ENUM               |
+| provider_transaction_id | TEXT               |
+| created_at              | TIMESTAMP          |
+| completed_at            | TIMESTAMP nullable |
+
+---
+
+# Payment Logic
+
+---
+
+## Successful payment
+
+```text id="rjlwm5"
+credits += purchased_credits
+```
+
+Insert transaction:
+
+```text id="kjlwm0"
+transaction_type = purchase
+```
+
+---
+
+## Failed payment
+
+```text id="g8l6my"
+do not modify credits
+```
+
+---
+
+# 6. Suggested Backend Operational Flow
+
+---
+
+# AUTH FLOW
+
+```text id="jlwmk3"
+auth_users handles login
+profiles handles business/user data
+```
+
+---
+
+# JOB FLOW
+
+```text id="d2a7my"
+User uploads assets
+    ↓
+Create job
+    ↓
+Check credits
+    ↓
+Reserve credits
+    ↓
+Queue AI processing
+    ↓
+Processing worker updates status
+    ↓
+Success:
+    deduct credits permanently
+
+Failure:
+    release reserved credits
+```
+
+---
+
+# WHY THIS STRUCTURE IS STRONG
+
+---
+
+## Separation of concerns
+
+| Concern            | Table               |
+| ------------------ | ------------------- |
+| Authentication     | auth_users          |
+| User/business info | profiles            |
+| AI jobs            | jobs                |
+| Credits history    | credit_transactions |
+| Real payments      | payments            |
+
+---
+Do NOT store:
+
+* raw processing state in memory only
+* only current credits
+* only job final state
+
+Persist everything important.
+
+AI pipelines fail unpredictably.
+This schema already prepares for that properly.

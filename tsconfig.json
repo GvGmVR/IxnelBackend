@@ -15,6 +15,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "Todelete/lib/astra.ts", "Todelete/config/db.ts", "Todelete/config/env.ts", "Todelete/controllers/auth.controller.ts", "Todelete/controllers/editor.controller.ts", "Todelete/controllers/feedback.controller.ts", "Todelete/controllers/newsletter.controller.ts", "Todelete/controllers/pipeline.controller.ts", "Todelete/controllers/project.controller.ts", "Todelete/controllers/news.controller.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { env } from '../config/env';
+import { env } from '../../Todelete/config/env';
 
 const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY;
 const ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID;

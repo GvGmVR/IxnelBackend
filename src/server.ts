@@ -1,107 +1,149 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { env } from './config/env';
-import { connectDB } from './config/db';
-import { errorHandler } from './middleware/errorHandler';
-
-// Route imports
-import authRoutes from './routes/auth.routes';
-import projectRoutes from './routes/project.routes';
-import newsRoutes from './routes/news.routes';
-import newsletterRoutes from './routes/newsletter.routes';
-import pipelineRoutes from './routes/pipeline.routes';
-import editorRoutes from './routes/editor.routes';
-import feedbackRoutes from './routes/feedback.routes';
 import path from 'path';
 import fs from 'fs';
 
+// ─── Route Imports ────────────────────────────────────────────────────────────
+import healthRoutes    from './routes/health.routes';
+import authRoutes      from './routes/auth.routes';
+import profileRoutes   from './routes/profile.routes';
+import jobRoutes       from './routes/jobs.routes';
+import creditRoutes    from './routes/credits.routes';
+import paymentRoutes   from './routes/payments.routes';
+import adminRoutes     from './routes/admin.routes';
+
+// ─── Middleware Imports ───────────────────────────────────────────────────────
+import { errorHandler }   from './middleware/errorHandler';
+import { requestLogger }  from './middleware/requestLogger';
 
 const app = express();
 
-// ─── Trust Proxy for Render ─────────────────────────────────────────────────────
+// ─── Trust Proxy ──────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
 
-// ─── Security Middleware ─────────────────────────────────────────────────────
+// ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: false,
 }));
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 const allowedOrigins = [
-  env.FRONTEND_URL,
-  'https://ixnel-frontend.vercel.app',
-  'http://localhost:5173'
-];
+  process.env.FRONTEND_URL,
+  'http://localhost:5173',
+  'http://localhost:3000',
+].filter(Boolean) as string[];
 
 app.use(cors({
-  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
+  origin: (
+    origin: string | undefined,
+    callback: (err: Error | null, allow?: boolean) => void
+  ) => {
+    // Allow REST clients / mobile / curl (no origin)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error(`CORS: origin ${origin} not allowed`));
     }
   },
   credentials: true,
 }));
 
+// ─── Rate Limiting ────────────────────────────────────────────────────────────
 
-
-// ─── Rate Limiting ───────────────────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per window
-  message: { success: false, error: 'Too many requests, please try again later.' },
+// General API limiter
+const generalLimiter = rateLimit({
+  windowMs : 15 * 60 * 1000,   // 15 minutes
+  max      : 100,
+  message  : {
+    success : false,
+    error   : 'Too many requests, please try again later.'
+  },
 });
-app.use('/api/', limiter);
 
-// ─── Body Parsing ────────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' })); // 10mb for scene data
+// Stricter limiter for auth endpoints
+const authLimiter = rateLimit({
+  windowMs : 15 * 60 * 1000,   // 15 minutes
+  max      : 20,
+  message  : {
+    success : false,
+    error   : 'Too many auth attempts, please try again later.'
+  },
+});
+
+// Job submission limiter
+const jobLimiter = rateLimit({
+  windowMs : 60 * 1000,         // 1 minute
+  max      : 10,
+  message  : {
+    success : false,
+    error   : 'Job submission limit reached, slow down.'
+  },
+});
+
+app.use('/api/', generalLimiter);
+
+// ─── Body Parsing ─────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── Static Files ─────────────────────────────────────────────────────────────
+// ─── Request Logger (dev) ─────────────────────────────────────────────────────
+if (process.env.NODE_ENV !== 'production') {
+  app.use(requestLogger);
+}
+
+// ─── Static / Uploads ─────────────────────────────────────────────────────────
 const uploadDir = path.join(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 app.use('/uploads', express.static(uploadDir));
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/news', newsRoutes);
-app.use('/api/newsletter', newsletterRoutes);
-app.use('/api/jobs', pipelineRoutes);
-app.use('/api/editor', editorRoutes);
-app.use('/api/feedback', feedbackRoutes);
+// ─── Routes ───────────────────────────────────────────────────────────────────
+app.use('/api/health',    healthRoutes);
+app.use('/api/auth',      authLimiter, authRoutes);
+app.use('/api/profile',   profileRoutes);
+app.use('/api/jobs',      jobLimiter,  jobRoutes);
+app.use('/api/credits',   creditRoutes);
+app.use('/api/payments',  paymentRoutes);
+app.use('/api/admin',     adminRoutes);
 
-// ─── Health Check ────────────────────────────────────────────────────────────
+// ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
-  res.send('<h1>TemporalAI API is LIVE</h1><p>Visit /api/health for details.</p>');
+  res.send('<h1>IXNEL API is LIVE</h1><p>Visit /api/health for status.</p>');
 });
 
-app.get('/api/health', (_req, res) => {
-  res.status(200).json({ success: true, message: 'TemporalAI API is running' });
+// ─── 404 Handler ──────────────────────────────────────────────────────────────
+app.use((_req, res) => {
+  res.status(404).json({
+    success : false,
+    error   : 'Route not found',
+  });
 });
 
-// ─── Global Error Handler ────────────────────────────────────────────────────
+// ─── Global Error Handler ─────────────────────────────────────────────────────
 app.use(errorHandler);
 
-// ─── Start Server ────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || env.PORT, 10);
+// ─── Start Server ─────────────────────────────────────────────────────────────
+const PORT = parseInt(process.env.PORT || '5000', 10);
 
 const startServer = async () => {
-  await connectDB();
-  app.listen(PORT, () => {
-    console.log(`🚀 TemporalAI API running on http://localhost:${PORT}`);
-    console.log(`📡 CORS enabled for: ${env.FRONTEND_URL}`);
-  });
+  try {
+    app.listen(PORT, () => {
+      console.log(`🚀 IXNEL API running       → http://localhost:${PORT}`);
+      console.log(`📡 CORS allowed origins    → ${allowedOrigins.join(', ')}`);
+      console.log(`🌍 Environment             → ${process.env.NODE_ENV || 'development'}`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
 };
 
-startServer().catch((error) => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-});
+startServer();
 
 export default app;
