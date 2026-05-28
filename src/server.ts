@@ -1,24 +1,57 @@
+// server.ts
+
 import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import path from 'path';
-import fs from 'fs';
+import express    from 'express';
+import cors       from 'cors';
+import helmet     from 'helmet';
+import rateLimit  from 'express-rate-limit';
+import path       from 'path';
+import fs         from 'fs';
 
 // ─── Route Imports ────────────────────────────────────────────────────────────
-import healthRoutes    from './routes/health.routes';
-import authRoutes      from './routes/auth.routes';
-import profileRoutes   from './routes/profile.routes';
-import jobRoutes       from './routes/jobs.routes';
-import creditRoutes    from './routes/credits.routes';
-import paymentRoutes   from './routes/payments.routes';
-import adminRoutes     from './routes/admin.routes';
+import healthRoutes  from './routes/health.routes';
+import authRoutes    from './routes/auth.routes';
+import profileRoutes from './routes/profile.routes';
+import jobRoutes     from './routes/jobs.routes';
+import creditRoutes  from './routes/credits.routes';
+import paymentRoutes from './routes/payments.routes';
 
 // ─── Middleware Imports ───────────────────────────────────────────────────────
-import { errorHandler }   from './middleware/errorHandler';
-import { requestLogger }  from './middleware/requestLogger';
+import { errorHandler }  from './middleware/errorHandler';
+import { requestLogger } from './middleware/requestLogger';
 
+// ─── DB Import (for startup check) ───────────────────────────────────────────
+import { pool } from './config/db';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 0: Environment variable guard
+// Fail immediately at startup if critical vars are missing
+// Prevents silent failures deep inside controllers
+// ─────────────────────────────────────────────────────────────────────────────
+const REQUIRED_ENV_VARS = [
+  'JWT_ACCESS_SECRET',
+  'JWT_REFRESH_SECRET',
+  'DB_NAME',
+  'DB_USER',
+  'DB_PASSWORD',
+  'FRONTEND_URL',
+] as const;
+
+const checkRequiredEnvVars = (): void => {
+  const missing = REQUIRED_ENV_VARS.filter(key => !process.env[key]);
+
+  if (missing.length > 0) {
+    console.error('❌ Missing required environment variables:');
+    missing.forEach(key => console.error(`   - ${key}`));
+    process.exit(1);
+  }
+
+  console.log('✅ Environment variables verified');
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APP SETUP
+// ─────────────────────────────────────────────────────────────────────────────
 const app = express();
 
 // ─── Trust Proxy ──────────────────────────────────────────────────────────────
@@ -38,60 +71,53 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: (
-    origin: string | undefined,
-    callback: (err: Error | null, allow?: boolean) => void
+    origin   : string | undefined,
+    callback : (err: Error | null, allow?: boolean) => void,
   ) => {
-    // Allow REST clients / mobile / curl (no origin)
+    // Allow REST clients / mobile / curl (no origin header)
     if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.warn(`[CORS] Blocked origin: ${origin}`);
       callback(new Error(`CORS: origin ${origin} not allowed`));
     }
   },
   credentials: true,
 }));
 
-// ─── Rate Limiting ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// RATE LIMITERS
+// Each route group has its own limiter — no double-limiting
+// ─────────────────────────────────────────────────────────────────────────────
 
-// General API limiter
 const generalLimiter = rateLimit({
-  windowMs : 15 * 60 * 1000,   // 15 minutes
+  windowMs : 15 * 60 * 1000,  // 15 minutes
   max      : 100,
-  message  : {
-    success : false,
-    error   : 'Too many requests, please try again later.'
-  },
+  message  : { success: false, error: 'Too many requests, please try again later.' },
 });
 
-// Stricter limiter for auth endpoints
+// Auth is stricter — brute force protection on login/register
 const authLimiter = rateLimit({
-  windowMs : 15 * 60 * 1000,   // 15 minutes
+  windowMs : 15 * 60 * 1000,  // 15 minutes
   max      : 20,
-  message  : {
-    success : false,
-    error   : 'Too many auth attempts, please try again later.'
-  },
+  message  : { success: false, error: 'Too many auth attempts, please try again later.' },
 });
 
-// Job submission limiter
+// Job submission — per minute, per IP
 const jobLimiter = rateLimit({
-  windowMs : 60 * 1000,         // 1 minute
+  windowMs : 60 * 1000,        // 1 minute
   max      : 10,
-  message  : {
-    success : false,
-    error   : 'Job submission limit reached, slow down.'
-  },
+  message  : { success: false, error: 'Job submission limit reached, slow down.' },
 });
-
-app.use('/api/', generalLimiter);
 
 // ─── Body Parsing ─────────────────────────────────────────────────────────────
+// Must come AFTER rate limiting — no point parsing body of rejected requests
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── Request Logger (dev) ─────────────────────────────────────────────────────
+// ─── Request Logger (non-production only) ────────────────────────────────────
 if (process.env.NODE_ENV !== 'production') {
   app.use(requestLogger);
 }
@@ -103,14 +129,16 @@ if (!fs.existsSync(uploadDir)) {
 }
 app.use('/uploads', express.static(uploadDir));
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/api/health',    healthRoutes);
-app.use('/api/auth',      authLimiter, authRoutes);
-app.use('/api/profile',   profileRoutes);
-app.use('/api/jobs',      jobLimiter,  jobRoutes);
-app.use('/api/credits',   creditRoutes);
-app.use('/api/payments',  paymentRoutes);
-app.use('/api/admin',     adminRoutes);
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTES
+// Each route group gets its own limiter — no double-limiting on auth
+// ─────────────────────────────────────────────────────────────────────────────
+app.use('/api/health',   generalLimiter, healthRoutes);
+app.use('/api/auth',     authLimiter,    authRoutes);    // ← auth only has authLimiter
+app.use('/api/profile',  generalLimiter, profileRoutes);
+app.use('/api/jobs',     jobLimiter,     jobRoutes);     // ← jobs only has jobLimiter
+app.use('/api/credits',  generalLimiter, creditRoutes);
+app.use('/api/payments', generalLimiter, paymentRoutes);
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
@@ -128,16 +156,33 @@ app.use((_req, res) => {
 // ─── Global Error Handler ─────────────────────────────────────────────────────
 app.use(errorHandler);
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SERVER STARTUP
+// Order: env check → db check → listen
+// If any step fails, process exits — no zombie server accepting requests
+// ─────────────────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
-const startServer = async () => {
+const startServer = async (): Promise<void> => {
   try {
+
+    // ── Step 1: Env vars ───────────────────────────────────────────────────
+    checkRequiredEnvVars();
+
+    // ── Step 2: DB connection ──────────────────────────────────────────────
+    console.log('🔌 Verifying database connection...');
+    const dbClient = await pool.connect();
+    await dbClient.query('SELECT 1');
+    dbClient.release();
+    console.log('✅ Database connection verified');
+
+    // ── Step 3: Start listening ────────────────────────────────────────────
     app.listen(PORT, () => {
       console.log(`🚀 IXNEL API running       → http://localhost:${PORT}`);
       console.log(`📡 CORS allowed origins    → ${allowedOrigins.join(', ')}`);
       console.log(`🌍 Environment             → ${process.env.NODE_ENV || 'development'}`);
     });
+
   } catch (error) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);

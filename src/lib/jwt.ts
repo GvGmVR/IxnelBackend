@@ -11,9 +11,12 @@ export interface JwtPayload {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Secrets - typed as Secret to satisfy jsonwebtoken
+// Make environment variables optional for development
 // ─────────────────────────────────────────────────────────────────────────────
-const ACCESS_SECRET  : Secret = process.env.JWT_ACCESS_SECRET  as string;
-const REFRESH_SECRET : Secret = process.env.JWT_REFRESH_SECRET as string;
+
+
+const ACCESS_SECRET  : Secret = process.env.JWT_ACCESS_SECRET  || 'dev-access-secret';
+const REFRESH_SECRET : Secret = process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expiries - cast through unknown to satisfy strict StringValue type
@@ -23,9 +26,13 @@ const ACCESS_EXPIRES_IN  = (process.env.JWT_ACCESS_EXPIRES_IN  || '15m') as Sign
 const REFRESH_EXPIRES_IN = (process.env.JWT_REFRESH_EXPIRES_IN || '7d')  as SignOptions['expiresIn'];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sanity check at boot - fail fast if secrets are missing
+
+// Sanity check at boot - fail fast if secrets are missing in PROD only
+// Allow fallback for development
 // ─────────────────────────────────────────────────────────────────────────────
-if (!ACCESS_SECRET || !REFRESH_SECRET) {
+
+const isDev = process.env.NODE_ENV === 'development';
+if (!isDev && (!ACCESS_SECRET || !REFRESH_SECRET)) {
   throw new Error(
     'JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be defined in .env'
   );

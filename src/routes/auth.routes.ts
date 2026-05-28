@@ -1,6 +1,6 @@
-import { Router } from 'express';
+// auth.routes.ts
 
-// Controllers (implement logic later)
+import { Router } from 'express';
 import {
   registerLocal,
   loginLocal,
@@ -10,55 +10,29 @@ import {
   resetPassword,
   refreshToken,
   logout,
-  getMe, 
+  getMe,
 } from '../controllers/auth.controller';
-
 import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC ROUTES
+// PUBLIC ROUTES — no token required
 // ─────────────────────────────────────────────────────────────────────────────
 
-// POST /api/auth/register
-// Local email + password registration
-router.post('/register', registerLocal);
-
-// POST /api/auth/login
-// Local email + password login
-router.post('/login', loginLocal);
-
-// POST /api/auth/oauth/callback
-// OAuth provider callback (google, github)
-// Body: { provider, provider_user_id, email, username? }
-router.post('/oauth/callback', oauthCallback);
-
-// GET /api/auth/verify-email?token=xxx
-// Email verification link handler
-router.get('/verify-email', verifyEmail);
-
-// POST /api/auth/forgot-password
-// Sends reset link to email
+router.post('/register',        registerLocal);
+router.post('/login',           loginLocal);
+router.post('/oauth/callback',  oauthCallback);
+router.get ('/verify-email',    verifyEmail);    // ← GET, not POST — token in query param
 router.post('/forgot-password', forgotPassword);
-
-// POST /api/auth/reset-password
-// Resets password with valid token
-router.post('/reset-password', resetPassword);
-
-// POST /api/auth/refresh
-// Refreshes access token using refresh token
-router.post('/refresh', refreshToken);
+router.post('/reset-password',  resetPassword);
+router.post('/refresh',         refreshToken);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PROTECTED ROUTES
+// PROTECTED ROUTES — requireAuth runs first
 // ─────────────────────────────────────────────────────────────────────────────
 
-// POST /api/auth/logout
-// Invalidates session / refresh token
 router.post('/logout', requireAuth, logout);
-
-// GET /api/auth/me
-router.get('/me', requireAuth, getMe);
+router.get ('/me',     requireAuth, getMe);
 
 export default router;
