@@ -20,3 +20,5 @@ yarn-error.log*
 
 # 4. Local DB Data
 data/db/
+
+.ngrok.yml

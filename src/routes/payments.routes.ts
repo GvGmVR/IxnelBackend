@@ -1,46 +1,66 @@
-import { Router } from 'express';
+// src/routes/payments.routes.ts
+import express from 'express';
+import { paymentsController } from '../controllers/payments.controller';
+import { requireAuth } from '../middleware/requireAuth'; // Mapped to your verified path and filename
+import { paymentService } from '../services/payment.service';
+import { paymentRepository } from '../repositories/payment.repository';
+import { subscriptionRepository } from '../repositories/subscription.repository';
 
-import {
-  initiatePayment,
-  verifyPayment,
-  getMyPayments,
-  getPaymentById,
-} from '../controllers/payments.controller';
+const router = express.Router();
 
-import { requireAuth } from '../middleware/requireAuth';
+/**
+ * 1. Create Checkout Session (Authenticated)
+ * Generates a transaction sealed inside Paddle to initiate the overlay checkout
+ */
+router.post(
+  '/create-checkout',
+  requireAuth,
+  paymentsController.createCheckout
+);
 
-const router = Router();
+/**
+ * 2. Paddle Billing Webhook Listener (Unauthenticated)
+ * Uses express.raw to preserve the exact raw body string for signature validation [1.2.4]
+ */
+router.post(
+  '/webhook/paddle',
+  paymentsController.handlePaddleWebhook
+);
 
-// All payment routes require authentication
-router.use(requireAuth);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/payments/initiate
-// Start a payment session with provider (razorpay/stripe)
-// Body: { amount, payment_provider }
-// Returns: provider order/session id
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/initiate', initiatePayment);
+/**
+ * 3. Cancel Active Subscription (Authenticated)
+ * Safely changes subscription status to cancelled while preserving credits [1.2.4]
+ */
+router.post(
+  '/cancel-subscription',
+  requireAuth,
+  paymentsController.cancelSubscription
+);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/payments/verify
-// Verify payment after frontend confirms
-// Body: { provider_transaction_id, payment_provider }
-// On success → credits added → transaction logged
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/verify', verifyPayment);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/payments
-// Payment history for logged-in user
-// Query params: ?status=success&page=1&limit=10
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/', getMyPayments);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /api/payments/:id
-// Single payment detail
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/:id', getPaymentById);
+/**
+ * PRODUCTION TRIGGER: Runs your actual daily credit renewal service [1.2.4].
+ * Requires ZERO headers, ZERO bodies, and ZERO tokens [1.2.4].
+ * POST http://localhost:5000/api/payments/cron/renew-credits
+ */
+router.post('/cron/renew-credits', async (req, res) => {
+  try {
+    console.log('[Cron Route] Triggering daily credit renewal checks...');
+    
+    // Directly runs your exact production database-updating function [1.2.4]
+    await paymentService.runDailyCreditRenewal(); 
+    
+    res.status(200).json({ 
+      success: true, 
+      message: 'Subscription monthly credit renewals successfully completed.' 
+    });
+  } catch (err) {
+    console.error('[Cron Route] Error during renewal:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: err instanceof Error ? err.message : String(err) 
+    });
+  }
+});
 
 export default router;

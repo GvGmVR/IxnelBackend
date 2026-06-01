@@ -1,0 +1,15 @@
+Paddle test
+
+1. General Test Credentials
+Cardholder Name: Any name (e.g., John Doe)[2]
+Expiry Date: Any month and year in the future (e.g., 12/28 or 09/30)[2]
+CVV / CVC: Any 3-digit number (e.g., 123 or 111)[3]
+ZIP / Postcode: Any standard zip code matching your chosen checkout country (e.g., 90210 for US, 641001 for India)
+
+2. Sandbox Test Card Numbers
+Scenario	Card Number to Use	Notes
+Instant Success (No 3D Secure)	4242 4242 4242 4242[2]	Standard testing (Recommended)
+Valid Visa Debit Card	4000 0566 5566 5556[2]	Simulates standard global debit cards
+3D Secure Challenge (3DS)	4000 0038 0000 0446[2]	Prompts a mock OTP/bank verification popup
+Declined Card (Failed Payment)	4000 0000 0000 0002[2]	Useful to test error-handling in your system
+Succeeds first, then declines	4000 0027 6000 3184[2]	Simulates an expired card on a future renewal

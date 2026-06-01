@@ -56,27 +56,17 @@ const buildUserResponse = (row: {
   updated_at     : row.updated_at,
 });
 
-const buildProfileResponse = (row: {
-  id                 : string;
-  auth_user_id       : string;
-  username           : string;
-  user_type          : string;
-  company_name       : string | null;
-  credits            : number;
-  reserved_credits   : number;
-  total_credits_used : number;
-  is_blocked         : boolean;
-  created_at         : string;
-  updated_at         : string;
-}) => ({
+const buildProfileResponse = (row: any) => ({
   id                 : row.id,
   auth_user_id       : row.auth_user_id,
   username           : row.username,
   user_type          : row.user_type,
   company_name       : row.company_name,
-  credits            : row.credits,
+  credits            : row.current_credit_balance,
+  subscription_credits: row.subscription_credits, // Exposes expiring subscription pool [1.2.4]
+  purchased_credits  : row.purchased_credits,   // Exposes non-expiring purchased pool [1.2.4]
   reserved_credits   : row.reserved_credits,
-  available_credits  : row.credits - row.reserved_credits,
+  available_credits  : row.current_credit_balance - row.reserved_credits,
   total_credits_used : row.total_credits_used,
   is_blocked         : row.is_blocked,
   created_at         : row.created_at,
@@ -194,6 +184,8 @@ const insertAuthUser = async (
   return result.rows[0];
 };
 
+// auth.controller.ts (Update these 3 helper functions)
+
 const insertProfile = async (
   client: PoolClient,
   auth_user_id: string,
@@ -210,19 +202,80 @@ const insertProfile = async (
     initial_credits,
   });
 
+  // Safe: Inserts initial welcome credits directly into purchased_credits [1.2.4]
   const result = await client.query(
     `INSERT INTO profiles
        (auth_user_id, username, user_type, company_name,
-        credits, reserved_credits, total_credits_used, is_blocked)
-     VALUES ($1, $2, $3, $4, $5, 0, 0, false)
+        current_credit_balance, purchased_credits, subscription_credits,
+        reserved_credits, total_credits_used, is_blocked)
+     VALUES ($1, $2, $3, $4, $5, $5, 0, 0, 0, false)
      RETURNING
        id, auth_user_id, username, user_type, company_name,
-       credits, reserved_credits, total_credits_used,
+       current_credit_balance, purchased_credits, subscription_credits,
+       reserved_credits, total_credits_used,
        is_blocked, created_at, updated_at`,
     [auth_user_id, username, user_type, company_name, initial_credits],
   );
 
   debug.info('insertProfile', 'success', { id: result.rows[0].id });
+  return result.rows[0];
+};
+
+// auth.controller.ts (Update these 2 helper queries)
+
+const fetchProfileByAuthUserId = async (
+  auth_user_id: string,
+) => {
+  debug.info('fetchProfileByAuthUserId', 'querying', { auth_user_id });
+
+  // Selects subscription_credits and purchased_credits explicitly [1]
+  const result = await pool.query(
+    `SELECT
+       id, auth_user_id, username, user_type, company_name,
+       current_credit_balance, subscription_credits, purchased_credits, reserved_credits, total_credits_used,
+       is_blocked, created_at, updated_at
+     FROM profiles WHERE auth_user_id = $1`,
+    [auth_user_id],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) {
+    debug.warn('fetchProfileByAuthUserId', 'not_found', { auth_user_id });
+    return null;
+  }
+
+  debug.info('fetchProfileByAuthUserId', 'found', {
+    profile_id : result.rows[0].id,
+    is_blocked : result.rows[0].is_blocked,
+  });
+
+  return result.rows[0];
+};
+
+const fetchProfileById = async (
+  profile_id: string,
+) => {
+  debug.info('fetchProfileById', 'querying', { profile_id });
+
+  // Selects subscription_credits and purchased_credits explicitly [1]
+  const result = await pool.query(
+    `SELECT
+       id, auth_user_id, username, user_type, company_name,
+       current_credit_balance, subscription_credits, purchased_credits, reserved_credits, total_credits_used,
+       is_blocked, created_at, updated_at
+     FROM profiles WHERE id = $1`,
+    [profile_id],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) {
+    debug.warn('fetchProfileById', 'not_found', { profile_id });
+    return null;
+  }
+
+  debug.info('fetchProfileById', 'found', {
+    profile_id,
+    is_blocked: result.rows[0].is_blocked,
+  });
+
   return result.rows[0];
 };
 
@@ -281,60 +334,6 @@ const fetchAuthUserByEmail = async (
   }
 
   debug.info('fetchAuthUserByEmail', 'found', { email, provider: result.rows[0].auth_provider });
-  return result.rows[0];
-};
-
-const fetchProfileByAuthUserId = async (
-  auth_user_id: string,
-) => {
-  debug.info('fetchProfileByAuthUserId', 'querying', { auth_user_id });
-
-  const result = await pool.query(
-    `SELECT
-       id, auth_user_id, username, user_type, company_name,
-       credits, reserved_credits, total_credits_used,
-       is_blocked, created_at, updated_at
-     FROM profiles WHERE auth_user_id = $1`,
-    [auth_user_id],
-  );
-
-  if (!result.rowCount || result.rowCount === 0) {
-    debug.warn('fetchProfileByAuthUserId', 'not_found', { auth_user_id });
-    return null;
-  }
-
-  debug.info('fetchProfileByAuthUserId', 'found', {
-    profile_id : result.rows[0].id,
-    is_blocked : result.rows[0].is_blocked,
-  });
-
-  return result.rows[0];
-};
-
-const fetchProfileById = async (
-  profile_id: string,
-) => {
-  debug.info('fetchProfileById', 'querying', { profile_id });
-
-  const result = await pool.query(
-    `SELECT
-       id, auth_user_id, username, user_type, company_name,
-       credits, reserved_credits, total_credits_used,
-       is_blocked, created_at, updated_at
-     FROM profiles WHERE id = $1`,
-    [profile_id],
-  );
-
-  if (!result.rowCount || result.rowCount === 0) {
-    debug.warn('fetchProfileById', 'not_found', { profile_id });
-    return null;
-  }
-
-  debug.info('fetchProfileById', 'found', {
-    profile_id,
-    is_blocked: result.rows[0].is_blocked,
-  });
-
   return result.rows[0];
 };
 
@@ -584,10 +583,14 @@ export const loginLocal = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    // ── Step 7: Build and return response ──
+     // ── Step 7: Build and return response ──
     const tokens = buildTokenPair(
       buildTokenPayload(authUser.id, profile.id, authUser.email),
     );
+
+    // Fetch active subscription if it exists [1.2.4]
+    const subscription = await fetchSubscriptionByProfileId(profile.id);
+    const payments = await fetchPaymentsByProfileId(profile.id);
 
     debug.info(FN, 'success', { email: normalizedEmail, profile_id: profile.id });
 
@@ -596,6 +599,8 @@ export const loginLocal = async (req: Request, res: Response): Promise<void> => 
       ...tokens,
       user    : buildUserResponse(authUser),
       profile : buildProfileResponse(profile),
+      subscription: subscription, // Included [1.2.4]
+      payments: payments,
     });
 
   } catch (err) {
@@ -781,6 +786,10 @@ export const oauthCallback = async (req: Request, res: Response): Promise<void> 
       buildTokenPayload(auth_user_id, profile.id, normalizedEmail),
     );
 
+    // Fetch active subscription if it exists [1.2.4]
+    const subscription = await fetchSubscriptionByProfileId(profile.id);
+    const payments = await fetchPaymentsByProfileId(profile.id); // Added [1.2.4]
+
     debug.info(FN, 'success', { auth_user_id, isNewUser });
 
     res.status(isNewUser ? 201 : 200).json({
@@ -789,7 +798,10 @@ export const oauthCallback = async (req: Request, res: Response): Promise<void> 
       ...tokens,
       user      : buildUserResponse(authUser),
       profile   : buildProfileResponse(profile),
+      subscription: subscription, // Included [1.2.4]
+      payments: payments,
     });
+
 
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1053,6 +1065,58 @@ export const refreshToken = async (req: Request, res: Response): Promise<void> =
   }
 };
 
+/**
+ * Safely fetches the active subscription record for a profile if one exists [1.2.4].
+ */
+const fetchSubscriptionByProfileId = async (
+  profile_id: string,
+) => {
+  debug.info('fetchSubscriptionByProfileId', 'querying', { profile_id });
+
+  const result = await pool.query(
+    `SELECT id, profile_id, payment_provider, provider_subscription_id, provider_customer_id,
+            plan_code, subscription_status, billing_cycle, current_period_start, current_period_end,
+            cancel_at_period_end, last_renewed_at, created_at, updated_at
+     FROM subscriptions 
+     WHERE profile_id = $1 AND subscription_status IN ('active', 'trialing', 'past_due')
+     ORDER BY current_period_end DESC
+     LIMIT 1;`,
+    [profile_id],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) {
+    debug.info('fetchSubscriptionByProfileId', 'no_active_subscription_found', { profile_id });
+    return null;
+  }
+
+  debug.info('fetchSubscriptionByProfileId', 'found', {
+    subscription_id : result.rows[0].id,
+    plan_code       : result.rows[0].plan_code,
+  });
+
+  return result.rows[0];
+};
+
+
+/**
+ * Fetches the raw payments history ledger for a profile [1.2.4].
+ */
+const fetchPaymentsByProfileId = async (
+  profile_id: string,
+) => {
+  debug.info('fetchPaymentsByProfileId', 'querying', { profile_id });
+
+  const result = await pool.query(
+    `SELECT id, amount, payment_status, created_at, currency_code, payment_type, credits_added
+     FROM payments
+     WHERE profile_id = $1
+     ORDER BY created_at DESC;`,
+    [profile_id],
+  );
+
+  return result.rows;
+};
+
 // =============================================================================
 // 8. LOGOUT
 // =============================================================================
@@ -1099,12 +1163,18 @@ export const getMe = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // Fetch active subscription if it exists [1.2.4]
+    const subscription = await fetchSubscriptionByProfileId(profile_id);
+    const payments = await fetchPaymentsByProfileId(profile_id); // Added [1.2.4]
+
     debug.info(FN, 'success', { auth_user_id, profile_id });
 
     res.status(200).json({
       success : true,
       user    : buildUserResponse(authUser),
       profile : buildProfileResponse(profile),
+      subscription: subscription, // Included [1.2.4]
+      payments: payments,
     });
 
   } catch (err) {

@@ -65,8 +65,11 @@ app.use(helmet({
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  'http://localhost',      // Added to support Vite port 80 [1.1.4, 1.2.4]
+  'http://localhost:80',   // Added to support Vite port 80 [1.1.4, 1.2.4]
   'http://localhost:5173',
   'http://localhost:3000',
+  
 ].filter(Boolean) as string[];
 
 app.use(cors({
@@ -77,7 +80,9 @@ app.use(cors({
     // Allow REST clients / mobile / curl (no origin header)
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
+    const isNgrok = origin.endsWith('.ngrok-free.dev');
+
+    if (allowedOrigins.includes(origin)|| isNgrok) {
       callback(null, true);
     } else {
       console.warn(`[CORS] Blocked origin: ${origin}`);
@@ -114,7 +119,15 @@ const jobLimiter = rateLimit({
 
 // ─── Body Parsing ─────────────────────────────────────────────────────────────
 // Must come AFTER rate limiting — no point parsing body of rejected requests
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ 
+  limit: '10mb',
+  // Captures the raw body buffer before it gets parsed into an object
+  verify: (req: any, _res, buf) => {
+    if (req.originalUrl?.includes('/webhook/paddle')) {
+      req.rawBody = buf; // Attaches the unmodified Buffer directly to the request
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // ─── Request Logger (non-production only) ────────────────────────────────────
