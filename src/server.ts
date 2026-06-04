@@ -15,6 +15,7 @@ import profileRoutes from './routes/profile.routes';
 import jobRoutes     from './routes/jobs.routes';
 import creditRoutes  from './routes/credits.routes';
 import paymentRoutes from './routes/payments.routes';
+import projectsRoutes from './routes/projects.routes';
 
 // ─── Middleware Imports ───────────────────────────────────────────────────────
 import { errorHandler }  from './middleware/errorHandler';
@@ -152,6 +153,7 @@ app.use('/api/profile',  generalLimiter, profileRoutes);
 app.use('/api/jobs',     jobLimiter,     jobRoutes);     // ← jobs only has jobLimiter
 app.use('/api/credits',  generalLimiter, creditRoutes);
 app.use('/api/payments', generalLimiter, paymentRoutes);
+app.use('/api/projects', generalLimiter, projectsRoutes);
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {

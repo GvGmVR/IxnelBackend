@@ -4,13 +4,13 @@
 :: Runs all migration SQL files in order
 :: ============================================================
 
-set DB_HOST=localhost
-set DB_PORT=5432
-set DB_NAME=animationproject
-set DB_USER=superadmin
+
 
 echo.
-echo ============================================================
+echo ========================================set DB_HOST=localhost
+set DB_PORT=5432
+set DB_NAME=animationproject
+set DB_USER=superadmin====================
 echo  Running migrations on %DB_NAME%
 echo ============================================================
 echo.

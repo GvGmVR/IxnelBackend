@@ -5,3 +5,22 @@ node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
 
 ngrok http 5000
+
+
+
+GUt commands:
+1. Inside frontend repo
+cd frontend
+git add .
+git commit -m "Fix OAuth user_type flow"
+git push
+2. Inside backend repo
+cd ../backend
+git add .
+git commit -m "Improve OAuth validation handling"
+git push
+3. Back to workspace repo
+cd ..
+git add .
+git commit -m "Update submodule references"
+git push
