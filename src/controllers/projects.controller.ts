@@ -174,5 +174,34 @@ export const projectsController = {
         error: error instanceof Error ? error.message : 'Failed to generate upload credentials.',
       });
     }
+  },
+
+  /**
+   * Deletes a project and cascade-wipes all its associated timeline assets [1.2.4].
+   * DELETE /api/projects/:id
+   */
+  deleteProject: async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { profile_id } = req.user!;
+      const projectId = req.params.id as string;
+
+      console.log(`[projectsController][deleteProject] Deleting project ${projectId} for profile ${profile_id}`);
+
+      // Deletes the row from projects (CASCADE constraint automatically wipes project_assets and jobs) [1.2.4]
+      const result = await pool.query(
+        `DELETE FROM projects WHERE id = $1 AND profile_id = $2 RETURNING id;`,
+        [projectId, profile_id as string]
+      );
+
+      if (result.rowCount === 0) {
+        res.status(404).json({ success: false, error: 'Project not found or unauthorized.' });
+        return;
+      }
+
+      res.status(200).json({ success: true, message: 'Project deleted successfully.' });
+    } catch (error) {
+      console.error('[projectsController][deleteProject] Error:', error);
+      res.status(500).json({ success: false, error: 'Internal server error deleting project.' });
+    }
   }
 };

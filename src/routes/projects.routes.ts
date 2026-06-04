@@ -29,4 +29,10 @@ router.get('/:id', requireAuth, projectsController.getProjectById);
  */
 router.post('/:id/assets/presign', requireAuth, projectsController.presignAsset);
 
+/**
+ * 5. Delete Project (Authenticated)
+ * Cascade wipes the project, associated assets, and jobs under safe DB constraints [1.2.4]
+ */
+router.delete('/:id', requireAuth, projectsController.deleteProject);
+
 export default router;
