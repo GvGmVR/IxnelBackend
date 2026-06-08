@@ -16,6 +16,7 @@ import jobRoutes     from './routes/jobs.routes';
 import creditRoutes  from './routes/credits.routes';
 import paymentRoutes from './routes/payments.routes';
 import projectsRoutes from './routes/projects.routes';
+import './workers/colorization_worker';
 
 // ─── Middleware Imports ───────────────────────────────────────────────────────
 import { errorHandler }  from './middleware/errorHandler';
@@ -37,6 +38,20 @@ const REQUIRED_ENV_VARS = [
   'DB_PASSWORD',
   'FRONTEND_URL',
 ] as const;
+
+// 1. Strict Limiter for standard API endpoints (e.g. login, submissions)
+export const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per 15 minutes
+  message: { success: false, error: 'Too many requests, please try again later.' }
+});
+
+// 2. Relaxed Limiter specifically for progress polling endpoints
+export const statusPollingLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute window
+  max: 60, // Allows up to 60 status checks per minute (1 check per second)
+  message: { success: false, error: 'Too many status checks. Please wait.' }
+});
 
 const checkRequiredEnvVars = (): void => {
   const missing = REQUIRED_ENV_VARS.filter(key => !process.env[key]);
@@ -143,6 +158,13 @@ if (!fs.existsSync(uploadDir)) {
 }
 app.use('/uploads', express.static(uploadDir));
 
+// ⚠️ FIX: Serve completed job downloads from the local 'temp/jobs' directory
+const jobsDir = path.join(process.cwd(), 'temp', 'jobs');
+if (!fs.existsSync(jobsDir)) {
+  fs.mkdirSync(jobsDir, { recursive: true });
+}
+app.use('/downloads', express.static(jobsDir));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ROUTES
 // Each route group gets its own limiter — no double-limiting on auth
@@ -150,7 +172,7 @@ app.use('/uploads', express.static(uploadDir));
 app.use('/api/health',   generalLimiter, healthRoutes);
 app.use('/api/auth',     authLimiter,    authRoutes);    // ← auth only has authLimiter
 app.use('/api/profile',  generalLimiter, profileRoutes);
-app.use('/api/jobs',     jobLimiter,     jobRoutes);     // ← jobs only has jobLimiter
+app.use('/api/jobs',     jobRoutes);     // ← jobs only has jobLimiter
 app.use('/api/credits',  generalLimiter, creditRoutes);
 app.use('/api/payments', generalLimiter, paymentRoutes);
 app.use('/api/projects', generalLimiter, projectsRoutes);

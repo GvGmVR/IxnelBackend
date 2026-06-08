@@ -1,11 +1,33 @@
 // src/routes/jobs.routes.ts
 
 import { Router } from 'express';
-import { jobsController } from '../controllers/jobs.controller'; // Aligned to the unified controller object [1]
+import { jobsController } from '../controllers/jobs.controller'; 
 import { requireAuth }    from '../middleware/requireAuth';
 import { requireCredits } from '../middleware/requireCredits';
+import multer from 'multer';
+import rateLimit from 'express-rate-limit'; // Imported locally
 
+const upload = multer(); // Memory storage configuration
 const router = Router();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SELF-CONTAINED ROUTE LIMITERS (Avoids circular imports with server.ts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Strictly limits job submissions to prevent spam (10 submissions per minute max)
+const jobLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 10,
+  message: { success: false, error: 'Job submission limit reached, slow down.' }
+});
+
+// Relaxed progress status check limits (allows up to 60 polls per minute)
+const statusPollingLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 60,
+  message: { success: false, error: 'Too many status checks. Please wait.' }
+});
+
 
 // All job routes require authentication
 router.use(requireAuth);
@@ -13,14 +35,13 @@ router.use(requireAuth);
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/jobs/submit
 // Submit a new AI processing job
-// requireCredits middleware checks available balance before controller runs
+// requireCredits checks available balance, and jobLimiter protects spamming
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/submit', requireCredits, jobsController.submitJob);
+router.post('/submit', jobLimiter, requireCredits, upload.any(), jobsController.submitJob);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/jobs
 // Get all jobs for logged-in user
-// Query params: ?status=queued&page=1&limit=10
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', jobsController.getMyJobs);
 
@@ -32,14 +53,13 @@ router.get('/:id', jobsController.getJobById);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/jobs/:id/status
-// Lightweight status polling endpoint
-// Frontend polls this to track job progress
+// Lightweight status polling endpoint protected by statusPollingLimiter
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/:id/status', jobsController.getJobStatus);
+router.get('/:id/status', statusPollingLimiter, jobsController.getJobStatus);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/jobs/:id/cancel
-// Cancel a queued job (only if status = queued or blocked) [1.2.4]
+// Cancel a queued job (only if status = queued or blocked)
 // ─────────────────────────────────────────────────────────────────────────────
 router.patch('/:id/cancel', jobsController.cancelJob);
 
