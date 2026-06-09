@@ -10,6 +10,8 @@ import {
   JwtPayload,
 }                            from '../lib/jwt';
 import { exchangeGitHubCode } from '../utils/github';
+import { emailService } from '../services/email.service';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -915,13 +917,13 @@ export const forgotPassword = async (req: Request, res: Response): Promise<void>
 
     if (!authUser) {
       debug.warn(FN, 'email_not_found_safe_exit', { normalizedEmail });
-      safeResponse();
+      safeResponse(); // Safe exit to prevent email harvesting [2]
       return;
     }
 
     if (authUser.auth_provider !== 'local') {
       debug.warn(FN, 'oauth_account_safe_exit', { provider: authUser.auth_provider });
-      safeResponse();
+      safeResponse(); // Safe exit for OAuth users (cannot reset password) [2]
       return;
     }
 
@@ -932,7 +934,13 @@ export const forgotPassword = async (req: Request, res: Response): Promise<void>
       { expiresIn: '15m' },
     );
 
-    debug.info(FN, 'reset_token_generated', {
+    // 1. Compile the secure reset URL
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+
+    // 2. Dispatch email asynchronously via Nodemailer
+    await emailService.sendPasswordResetEmail(normalizedEmail, resetLink);
+
+    debug.info(FN, 'reset_token_generated_and_sent', {
       auth_user_id : authUser.id,
       ...(process.env.NODE_ENV !== 'production' && { resetToken }),
     });

@@ -25,7 +25,7 @@ router.post('/login',           loginLocal);
 router.post('/oauth/callback',  oauthCallback);
 router.get ('/verify-email',    verifyEmail);    // ← GET, not POST — token in query param
 router.post('/forgot-password', forgotPassword);
-router.post('/reset-password',  resetPassword);
+router.post('/reset-password', resetPassword);
 router.post('/refresh',         refreshToken);
 
 // ─────────────────────────────────────────────────────────────────────────────
