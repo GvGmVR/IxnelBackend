@@ -1,14 +1,6 @@
 // src/services/email.service.ts
 import nodemailer from 'nodemailer';
 
-// ─── SMTP DIAGNOSTIC LOGS ───
-console.log('------------------ NODEMAILER DIAGNOSTICS ------------------');
-console.log('[DEBUG] SMTP_HOST:', process.env.SMTP_HOST);
-console.log('[DEBUG] SMTP_PORT:', process.env.SMTP_PORT);
-console.log('[DEBUG] SMTP_USER:', process.env.SMTP_USER);
-console.log('[DEBUG] SMTP_PASS Length:', process.env.SMTP_PASS ? process.env.SMTP_PASS.length : 'UNDEFINED');
-console.log('------------------------------------------------------------');
-
 // Initialize the SMTP transporter using environment keys
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,

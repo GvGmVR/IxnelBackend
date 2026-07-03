@@ -1,0 +1,21 @@
+Step 2: Sign and Package the Extension (.ZXP)
+Adobe requires CEP extensions to be packaged into a compressed format called a .zxp file.
+Configure the Manifest (CSXS/manifest.xml):
+Ensure your manifest targets correct After Effects host IDs (AEFT) and versions.
+Verify that Node.js integration is enabled inside the manifest parameters:
+code
+Xml
+<Parameter>--enable-nodejs</Parameter>
+Obtain a Digital Certificate:
+Adobe Exchange requires extensions to be signed with a commercial code-signing certificate. For standalone distribution, a self-signed certificate (generated via Adobe tools) can be used.
+Run ZXPSignCmd:
+Use Adobe's official ZXPSignCmd command-line utility to package and sign your extension directory into a .zxp file:
+code
+Bash
+ZXPSignCmd -sign <extensionFolder> <outputPackage>.zxp <certificate>.p12 <password>
+Step 3: Setup the Installer for Users
+Unsigned extensions require users to modify their system registries (PlayerDebugMode set to 1). Signing your .zxp eliminates this friction. To install the signed .zxp on user machines:
+Option A (Adobe Exchange): Upload your signed .zxp directly to the Adobe Exchange Creative Cloud marketplace. Adobe handles the installation automatically via the Creative Cloud Desktop app.
+Option B (SaaS / Standalone Installer): Use an installer tool (like Inno Setup for Windows and Packages for macOS) to automatically extract your extension files into the common Adobe CEP directories:
+Windows: C:\Program Files (x86)\Common Files\Adobe\CEP\extensions\IxnelColorizer
+macOS: /Library/Application Support/Adobe/CEP/extensions/IxnelColorizer

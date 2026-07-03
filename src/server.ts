@@ -17,6 +17,7 @@ import creditRoutes  from './routes/credits.routes';
 import paymentRoutes from './routes/payments.routes';
 import projectsRoutes from './routes/projects.routes';
 import './workers/colorization_worker';
+import externalRoutes from './routes/external.routes'; 
 
 // ─── Middleware Imports ───────────────────────────────────────────────────────
 import { errorHandler }  from './middleware/errorHandler';
@@ -98,7 +99,10 @@ app.use(cors({
 
     const isNgrok = origin.endsWith('.ngrok-free.dev');
 
-    if (allowedOrigins.includes(origin)|| isNgrok) {
+    //Detect if the request is originating from a local Adobe CEP file-system extensio
+    const isAdobeCEP = origin.startsWith('file://') || origin === 'file://';
+
+    if (allowedOrigins.includes(origin)|| isNgrok|| isAdobeCEP) {
       callback(null, true);
     } else {
       console.warn(`[CORS] Blocked origin: ${origin}`);
@@ -176,6 +180,7 @@ app.use('/api/jobs',     jobRoutes);     // ← jobs only has jobLimiter
 app.use('/api/credits',  generalLimiter, creditRoutes);
 app.use('/api/payments', generalLimiter, paymentRoutes);
 app.use('/api/projects', generalLimiter, projectsRoutes);
+app.use('/api/v1/external', externalRoutes); 
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {
@@ -199,6 +204,81 @@ app.use(errorHandler);
 // If any step fails, process exits — no zombie server accepting requests
 // ─────────────────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '5000', 10);
+/**
+ * ⚠️ STARTUP SWEEPER: Locates and fails any orphaned jobs left hanging in 'initiated' 
+ * or 'processing' states, cleanly releasing their reserved credits [1.2.4].
+ */
+const sweepOrphanedJobs = async (): Promise<void> => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Locate all unfinished active jobs
+    const query = `
+      SELECT id, profile_id, job_cost 
+      FROM jobs 
+      WHERE status IN ('initiated', 'processing');
+    `;
+    const result = await client.query(query);
+
+    if (result.rowCount === 0) {
+      await client.query('COMMIT');
+      console.log('✅ [Sweeper] No orphaned jobs found. Database fully synchronized.');
+      return;
+    }
+
+    console.log(`🧹 [Sweeper] Found ${result.rowCount} orphaned jobs. Releasing credit holds...`);
+
+    for (const job of result.rows) {
+      // Fail the job record
+      await client.query(
+        `UPDATE jobs 
+         SET status = 'failed', error_message = 'Job terminated due to unexpected server restart.', completed_at = NOW() 
+         WHERE id = $1;`,
+        [job.id]
+      );
+
+      // Lock profile to update reserved_credits
+      const profileResult = await client.query(
+        `SELECT current_credit_balance, reserved_credits FROM profiles WHERE id = $1 FOR UPDATE;`,
+        [job.profile_id]
+      );
+
+      if ((profileResult.rowCount ?? 0) > 0) {
+        const { current_credit_balance, reserved_credits } = profileResult.rows[0];
+        const newReserved = Math.max(0, reserved_credits - job.job_cost);
+
+        await client.query(
+          `UPDATE profiles SET reserved_credits = $1 WHERE id = $2;`,
+          [newReserved, job.profile_id]
+        );
+
+        // Record the reverse ledger reservation release
+        const finalAvailableBalance = current_credit_balance - newReserved;
+        await client.query(
+          `INSERT INTO credit_transactions (profile_id, transaction_type, amount, balance_after, reference_job_id, notes)
+           VALUES ($1, 'reservation_release', $2, $3, $4, $5);`,
+          [
+            job.profile_id,
+            'reservation_release',
+            job.job_cost,
+            finalAvailableBalance,
+            job.id,
+            `Released ${job.job_cost} reserved credits due to server restart recovery`
+          ]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    console.log('✅ [Sweeper] Orphaned jobs recovery complete. Database fully synchronized.');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ [Sweeper] Failed to execute startup recovery sweep:', error);
+  } finally {
+    client.release();
+  }
+};
 
 const startServer = async (): Promise<void> => {
   try {
@@ -213,6 +293,9 @@ const startServer = async (): Promise<void> => {
     dbClient.release();
     console.log('✅ Database connection verified');
 
+    // ─── Step 2.5: Run Startup Sweeper ───
+    await sweepOrphanedJobs();
+
     // ── Step 3: Start listening ────────────────────────────────────────────
     app.listen(PORT, () => {
       console.log(`🚀 IXNEL API running       → http://localhost:${PORT}`);
@@ -225,6 +308,7 @@ const startServer = async (): Promise<void> => {
     process.exit(1);
   }
 };
+
 
 startServer();
 

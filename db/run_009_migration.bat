@@ -10,8 +10,8 @@ set DB_NAME=animationproject
 set DB_USER=superadmin
 
 :: Run the specific migration file
-echo Running 009_add_storage_mode.sql...
-psql -h %DB_HOST% -p %DB_PORT% -U %DB_USER% -d %DB_NAME% -f migrations\009_add_storage_mode.sql
+echo Running 010_api_keys.sql...
+psql -h %DB_HOST% -p %DB_PORT% -U %DB_USER% -d %DB_NAME% -f migrations\010_api_keys.sql
 
 echo.
 echo =================================================

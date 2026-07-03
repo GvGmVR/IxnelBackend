@@ -5,7 +5,7 @@ import {
   getCreditTransactions,
   getCreditTransactionById,
 } from '../controllers/credits.controller';
-
+import { apiKeysController } from '../controllers/api_keys.controller';
 import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
@@ -31,5 +31,10 @@ router.get('/transactions', getCreditTransactions);
 // Single transaction detail
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/transactions/:id', getCreditTransactionById);
+
+// ─── Developer API Key Management Routes ──────────────────────────────────────
+router.get('/keys', apiKeysController.listApiKeys);
+router.post('/keys', apiKeysController.createApiKey);
+router.delete('/keys/:id', apiKeysController.revokeApiKey);
 
 export default router;
