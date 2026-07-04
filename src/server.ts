@@ -18,6 +18,7 @@ import paymentRoutes from './routes/payments.routes';
 import projectsRoutes from './routes/projects.routes';
 import './workers/colorization_worker';
 import externalRoutes from './routes/external.routes'; 
+import feedbackRoutes from './routes/feedback.routes';
 
 // ─── Middleware Imports ───────────────────────────────────────────────────────
 import { errorHandler }  from './middleware/errorHandler';
@@ -181,6 +182,7 @@ app.use('/api/credits',  generalLimiter, creditRoutes);
 app.use('/api/payments', generalLimiter, paymentRoutes);
 app.use('/api/projects', generalLimiter, projectsRoutes);
 app.use('/api/v1/external', externalRoutes); 
+app.use('/api/feedback', feedbackRoutes);
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 app.get('/', (_req, res) => {

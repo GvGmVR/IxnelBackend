@@ -411,13 +411,13 @@ const validateNewOAuthUserBody = (body: Record<string, unknown>): string | null 
 
 // =============================================================================
 // 1. REGISTER LOCAL
-// =============================================================================
+// ============================================================================
 export const registerLocal = async (req: Request, res: Response): Promise<void> => {
   const FN = 'registerLocal';
   const client = await pool.connect();
 
   try {
-    debug.info(FN, 'start', { email: req.body.email, user_type: req.body.user_type });
+    debug.info(FN, 'start_deferred_verification_signup', { email: req.body.email });
 
     // ── Step 1: Validate input ──
     const validationError = validateRegisterLocalBody(req.body);
@@ -431,89 +431,56 @@ export const registerLocal = async (req: Request, res: Response): Promise<void> 
     const normalizedEmail    = (email as string).toLowerCase().trim();
     const normalizedUsername = (username as string).trim();
 
-    // ── Step 2: Begin transaction ──
-    debug.info(FN, 'tx_begin');
-    await client.query('BEGIN');
-
-    // ── Step 3: Email uniqueness check ──
+    // ── Step 2: Uniqueness check on Email (Without starting database transaction) ──
     const existingEmail = await checkEmailExists(client, normalizedEmail);
     if (existingEmail) {
       debug.warn(FN, 'email_conflict', { normalizedEmail });
-      await client.query('ROLLBACK');
       res.status(409).json({ success: false, error: 'An account with this email already exists' });
       return;
     }
 
-    // ── Step 4: Username uniqueness check ──
+    // ── Step 3: Uniqueness check on Username ──
     const usernameTaken = await checkUsernameExists(client, normalizedUsername);
     if (usernameTaken) {
       debug.warn(FN, 'username_conflict', { normalizedUsername });
-      await client.query('ROLLBACK');
       res.status(409).json({ success: false, error: 'Username is already taken' });
       return;
     }
 
-    // ── Step 5: Hash password ──
+    // ── Step 4: Hash password ──
     debug.info(FN, 'hashing_password');
     const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
 
-    // ── Step 6: Insert auth user ──
-    const authUser = await insertAuthUser(
-      client,
-      normalizedEmail,
-      password_hash,
-      'local',
-      null,
-      false,
+    // ── Step 5: Package registration details into stateful JWT token ──
+    const jwt = require('jsonwebtoken');
+    const verificationToken = jwt.sign(
+      { 
+        email: normalizedEmail, 
+        passwordHash: password_hash, 
+        username: normalizedUsername, 
+        user_type, 
+        company_name: user_type === 'company' ? (company_name as string).trim() : null,
+        purpose: 'email_verify_signup' 
+      },
+      process.env.JWT_ACCESS_SECRET as string,
+      { expiresIn: '24h' } // Expiry set to 24 hours
     );
 
-    // ── Step 7: Insert profile (Saves 'null' if the account is an individual) ──
-    const profile = await insertProfile(
-      client,
-      authUser.id,
-      normalizedUsername,
-      user_type,
-      user_type === 'company' ? (company_name as string).trim() : null,
-      FREE_SIGNUP_CREDITS,
-    );
+    // ── Step 6: Dispatch SMTP verification email ──
+    const verificationLink = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
+    await emailService.sendVerificationEmail(normalizedEmail, verificationLink);
 
-    // ── Step 8: Record free_grant transaction ──
-    await insertFreeGrantTransaction(
-      client,
-      profile.id,
-      FREE_SIGNUP_CREDITS,
-      'Welcome bonus credits on signup',
-    );
+    debug.info(FN, 'verification_email_dispatched_successfully', { email: normalizedEmail });
 
-    // ── Step 9: Commit ──
-    await client.query('COMMIT');
-    debug.info(FN, 'tx_committed', { auth_user_id: authUser.id, profile_id: profile.id });
-
-    // ── Step 10: Build and return response ──
-    const tokens = buildTokenPair(
-      buildTokenPayload(authUser.id, profile.id, authUser.email),
-    );
-
-    debug.info(FN, 'success', { email: normalizedEmail });
-
-    res.status(201).json({
-      success : true,
-      ...tokens,
-      user    : buildUserResponse(authUser),
-      profile : buildProfileResponse(profile),
+    // Respond 200 OK without writing any records to database yet
+    res.status(200).json({
+      success: true,
+      message: 'A verification link has been sent to your email. Please verify your inbox to activate your account.'
     });
 
   } catch (err) {
-    await client.query('ROLLBACK');
-    debug.error(FN, 'unhandled_exception', err);
-
-    res.status(500).json({
-      success : false,
-      error   : 'Internal server error during registration',
-      ...(process.env.NODE_ENV !== 'production' && {
-        detail: err instanceof Error ? err.message : String(err),
-      }),
-    });
+    debug.error(FN, 'unhandled_exception_during_signup', err);
+    res.status(500).json({ success: false, error: 'Internal server error during registration.' });
   } finally {
     client.release();
     debug.info(FN, 'client_released');
@@ -825,10 +792,11 @@ export const oauthCallback = async (req: Request, res: Response): Promise<void> 
 // 4. VERIFY EMAIL
 // =============================================================================
 
+// ⚠️ MODIFICATION: Stateful token validator that returns the full decoded payload of the pending user
 const decodeAndValidatePurposeToken = (
   token: string,
   expectedPurpose: string,
-): { auth_user_id: string } => {
+): any => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const jwt     = require('jsonwebtoken');
   const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET as string) as any;
@@ -837,11 +805,13 @@ const decodeAndValidatePurposeToken = (
     throw new Error(`Invalid token purpose: expected ${expectedPurpose}, got ${decoded.purpose}`);
   }
 
-  return { auth_user_id: decoded.auth_user_id };
+  return decoded;
 };
 
+// ⚠️ MODIFICATION: Process and write pending users to the database inside a safe transaction after verification
 export const verifyEmail = async (req: Request, res: Response): Promise<void> => {
   const FN = 'verifyEmail';
+  const client = await pool.connect();
 
   try {
     const { token } = req.query;
@@ -854,37 +824,88 @@ export const verifyEmail = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    let decoded: { auth_user_id: string };
+    let decodedPayload: any;
     try {
-      decoded = decodeAndValidatePurposeToken(token, 'email_verify');
+      decodedPayload = decodeAndValidatePurposeToken(token, 'email_verify_signup');
     } catch (err) {
       debug.warn(FN, 'invalid_token', { reason: err instanceof Error ? err.message : err });
-      res.status(400).json({ success: false, error: 'Invalid or expired token' });
+      res.status(400).json({ success: false, error: 'Invalid or expired verification token' });
       return;
     }
 
-    debug.info(FN, 'token_valid', { auth_user_id: decoded.auth_user_id });
+    const { email, passwordHash, username, user_type, company_name } = decodedPayload;
 
-    const result = await pool.query(
-      `UPDATE auth_users
-       SET email_verified = true, updated_at = NOW()
-       WHERE id = $1
-       RETURNING id`,
-      [decoded.auth_user_id],
+    debug.info(FN, 'token_valid_initiating_write_transaction', { email });
+
+    await client.query('BEGIN');
+
+    // Concurrency Check: Verify if email got registered while the verification was pending
+    const emailExists = await checkEmailExists(client, email);
+    if (emailExists) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, error: 'An account with this email is already registered.' });
+      return;
+    }
+
+    // Concurrency Check: Verify if username was taken while the verification was pending
+    const usernameTaken = await checkUsernameExists(client, username);
+    if (usernameTaken) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ success: false, error: 'This username is already taken.' });
+      return;
+    }
+
+    // 1. Insert auth user directly as verified
+    const authUser = await insertAuthUser(
+      client,
+      email,
+      passwordHash,
+      'local',
+      null,
+      true, // Set email_verified = true
     );
 
-    if (!result.rowCount || result.rowCount === 0) {
-      debug.warn(FN, 'user_not_found', { auth_user_id: decoded.auth_user_id });
-      res.status(404).json({ success: false, error: 'User not found' });
-      return;
-    }
+    // 2. Insert profile
+    const profile = await insertProfile(
+      client,
+      authUser.id,
+      username,
+      user_type,
+      company_name,
+      FREE_SIGNUP_CREDITS,
+    );
 
-    debug.info(FN, 'success', { auth_user_id: decoded.auth_user_id });
-    res.status(200).json({ success: true, message: 'Email verified successfully' });
+    // 3. Record free welcome grant
+    await insertFreeGrantTransaction(
+      client,
+      profile.id,
+      FREE_SIGNUP_CREDITS,
+      'Welcome bonus credits on email verification',
+    );
+
+    await client.query('COMMIT');
+    debug.info(FN, 'user_successfully_created_and_verified', { auth_user_id: authUser.id });
+
+    // 4. Generate token pairs immediately for automatic authentication
+    const tokens = buildTokenPair(
+      buildTokenPayload(authUser.id, profile.id, authUser.email),
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Email successfully verified! Your account is now active.',
+      ...tokens,
+      user: buildUserResponse(authUser),
+      profile: buildProfileResponse(profile),
+    });
 
   } catch (err) {
+    await client.query('ROLLBACK');
     debug.error(FN, 'unhandled_exception', err);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ success: false, error: 'Internal server error processing email verification.' });
+  } finally {
+    client.release();
+    debug.info(FN, 'client_released');
   }
 };
 

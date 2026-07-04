@@ -3,7 +3,6 @@
 import { Router } from 'express';
 import { jobsController } from '../controllers/jobs.controller'; 
 import { requireAuth }    from '../middleware/requireAuth';
-import { requireCredits } from '../middleware/requireCredits';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit'; // Imported locally
 
@@ -35,9 +34,8 @@ router.use(requireAuth);
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/jobs/submit
 // Submit a new AI processing job
-// requireCredits checks available balance, and jobLimiter protects spamming
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/submit', jobLimiter, requireCredits, upload.any(), jobsController.submitJob);
+router.post('/submit', jobLimiter, upload.any(), jobsController.submitJob);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/jobs
