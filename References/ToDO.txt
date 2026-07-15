@@ -19,3 +19,25 @@ Option A (Adobe Exchange): Upload your signed .zxp directly to the Adobe Exchang
 Option B (SaaS / Standalone Installer): Use an installer tool (like Inno Setup for Windows and Packages for macOS) to automatically extract your extension files into the common Adobe CEP directories:
 Windows: C:\Program Files (x86)\Common Files\Adobe\CEP\extensions\IxnelColorizer
 macOS: /Library/Application Support/Adobe/CEP/extensions/IxnelColorizer
+
+
+
+
+
+
+
+======================================================================
+📊 [RESOURCE UTILIZATION REPORT] - For Pricing Metrics --- 2 jobs
+======================================================================
+ ⏱️ Total Execution Time : 597.10 seconds
+ 🎮 Peak GPU VRAM Used   : 6.89 GB
+ 🧠 Peak System RAM Used : 0.95 GB
+======================================================================
+
+======================================================================
+📊 [RESOURCE UTILIZATION REPORT] - For Pricing Metrics
+======================================================================
+ ⏱️ Total Execution Time : 206.47 seconds
+ 🎮 Peak GPU VRAM Used   : 6.89 GB
+ 🧠 Peak System RAM Used : 10.80 GB
+======================================================================

@@ -24,3 +24,9 @@ cd ..
 git add .
 git commit -m "Update submodule references"
 git push
+
+
+
+docker system prune -f && docker builder prune -f
+docker build -t minor2543/ixnel-animecolor:v3 .
+docker push minor2543/ixnel-animecolor:v3

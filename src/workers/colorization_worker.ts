@@ -1,86 +1,27 @@
 // src/workers/colorization_worker.ts
 import { pool } from '../config/db';
-import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import fsSync from 'fs';
-import { createWriteStream } from 'fs';
-import { activeProcesses } from '../utils/processManager';
-
-import { execSync } from 'child_process';
-import os from 'os';
-
-function checkGPUMemory(): { free: number; total: number } | null {
-    try {
-        const output = execSync(
-            'nvidia-smi --query-gpu=memory.free,memory.total --format=csv,noheader,nounits',
-            { encoding: 'utf8', timeout: 5000 }
-        );
-        const [free, total] = output.trim().split(',').map(s => parseInt(s.trim()));
-        return { free, total };
-    } catch (err) {
-        console.warn('[Worker] Could not query GPU memory (nvidia-smi not available)');
-        return null;
-    }
-}
 
 const AdmZip = require('adm-zip') as any;
 
-const POLL_INTERVAL_MS = 2000;
-
-// 1. Configured to point directly to your external AnimeColor repo on Windows
-const SUBMODULE_DIR = 'D:\\Ixnel\\dev\\AnimeColor\\workspace';
-
-// 2. Define both potential Windows venv path configurations
-const pathA = path.join(SUBMODULE_DIR, 'AnimeColor_Code', 'venv', 'Scripts', 'python.exe');
-const pathB = path.join(SUBMODULE_DIR, 'venv', 'Scripts', 'python.exe');
-
-// 3. Self-healing resolution: Choose whichever path actually exists
-const PYTHON_PATH = fsSync.existsSync(pathA) ? pathA : pathB;
-
-// 4. Point to run_animecolor.py
-const MODEL_SCRIPT = path.join(SUBMODULE_DIR, 'run_animecolor.py');
-
-console.log(`[Worker] Path Resolution Verified:`);
-console.log(`         PYTHON_PATH  -> ${PYTHON_PATH}`);
-console.log(`         MODEL_SCRIPT -> ${MODEL_SCRIPT}`);
-
-// ─── PYTHON SUBPROCESS ENVIRONMENT ───────────────────────────────────────────
-// Forces UTF-8 encoding on the Python subprocess stdout/stderr pipes.
-// Without this, Windows CP1252 terminal encoding crashes on any Unicode
-// character (emoji, arrows, etc.) that Python tries to print.
-//
-// PYTHONIOENCODING=utf-8   → sets stdin/stdout/stderr codec to UTF-8
-// PYTHONUTF8=1             → enables Python 3.7+ UTF-8 mode globally
-//                            (affects file I/O, locale, etc. — defense in depth)
-// PYTHONLEGACYWINDOWSSTDIO is explicitly NOT set — that would re-enable CP1252
-const PYTHON_ENV = {
-    ...process.env,
-    PYTHONIOENCODING: 'utf-8',
-    PYTHONUTF8: '1',
-};
-
-/**
- * Compresses folder directory contents into a zip archive using adm-zip.
- */
-function zipDirectory(sourceDir: string, outPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-        try {
-            const zip = new AdmZip();
-            zip.addLocalFolder(sourceDir);
-            zip.writeZip(outPath);
-            resolve();
-        } catch (err) {
-            console.error('[Worker][zipDirectory] Compression failed:', err);
-            reject(err);
-        }
-    });
+// High-performance image processor
+let sharp: any = null;
+try {
+    sharp = require('sharp');
+    console.log('[Worker] sharp image compressor loaded successfully.');
+} catch (e) {
+    console.warn('[Worker] sharp library not found. Run "npm install sharp" to compress payloads and avoid RunPod 10MB limit errors.');
 }
+
+const DISPATCH_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 5000; // Check active RunPod jobs every 5 seconds
 
 /**
  * Queries and updates the oldest queued job in a thread-safe database transaction.
  */
-async function fetchAndLockJob() {
+async function fetchAndLockQueuedJob() {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -111,10 +52,309 @@ async function fetchAndLockJob() {
         return job;
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('[Worker] Error locking job:', error);
+        console.error('[Worker] Error locking queued job:', error);
         return null;
     } finally {
         client.release();
+    }
+}
+
+/**
+ * Dispatches the queued job to your active RunPod Serverless GPU Endpoint.
+ * Downscales inputs on-the-fly to prevent RunPod 10MB gateway blocks [1].
+ */
+async function dispatchJobToRunPod(job: any) {
+    const jobDir = job.input_path;
+    const framesDir = path.join(jobDir, 'frames');
+
+    console.log('\n======================================================================');
+    console.log(`[Worker] Job ID ${job.id} - DISPATCHING TO RUNPOD CLOUD`);
+    console.log(`[Worker] Local Workspace : ${jobDir}`);
+    console.log('======================================================================\n');
+
+    let refImageName = 'reference.png';
+    try {
+        const filesInDir = await fs.readdir(jobDir);
+        const refFile = filesInDir.find(f => f.startsWith('reference.'));
+        if (refFile) refImageName = refFile;
+    } catch (err) {
+        console.warn('[Worker] Directory read warning locating reference image:', err);
+    }
+    const refImagePath = path.join(jobDir, refImageName);
+
+    try {
+        const updateResult = await pool.query(
+            `UPDATE jobs SET status = 'processing' WHERE id = $1 AND status = 'initiated' RETURNING status;`,
+            [job.id]
+        );
+
+        if (updateResult.rowCount === 0) {
+            console.log(`[Worker] Job ${job.id} status changed (possibly cancelled). Aborting dispatch.`);
+            return;
+        }
+
+        let origWidth = 512;
+        let origHeight = 320;
+
+        // ─── RESOLUTION PRESERVATION: Read & Cache Original Dimensions [1] ───
+        if (sharp) {
+            try {
+                const frameFiles = await fs.readdir(framesDir);
+                const firstImage = frameFiles.find(f => ['.png', '.jpg', '.jpeg'].includes(path.extname(f).toLowerCase()));
+                if (firstImage) {
+                    const meta = await sharp(path.join(framesDir, firstImage)).metadata();
+                    origWidth = meta.width || 512;
+                    origHeight = meta.height || 320;
+                    console.log(`[Worker] Cached source dimensions: ${origWidth}x${origHeight} for restoration.`);
+                }
+            } catch (metaErr: any) {
+                console.warn('[Worker] Failed to read source image dimensions:', metaErr.message);
+            }
+
+            // Write metadata locally so the Polling daemon can retrieve it on completion [1]
+            const metaPath = path.join(jobDir, 'original_meta.json');
+            await fs.writeFile(metaPath, JSON.stringify({ origWidth, origHeight }));
+
+            // ─── Downscale payloads to 512x320 to bypass RunPod 10MB limits [1] ───
+            console.log('[Worker] Downscaling inputs to 512x320 for transmission...');
+            
+            // 1. Downscale reference image
+            try {
+                const refTempPath = refImagePath + '.tmp';
+                await sharp(refImagePath)
+                    .resize(512, 320, { fit: 'fill' })
+                    .jpeg({ quality: 80 })
+                    .toFile(refTempPath);
+                await fs.unlink(refImagePath);
+                await fs.rename(refTempPath, refImagePath);
+            } catch (refErr: any) {
+                console.warn('[Worker] Reference image compression failed:', refErr.message);
+            }
+
+            // 2. Downscale frames
+            try {
+                const frameFiles = await fs.readdir(framesDir);
+                for (const file of frameFiles) {
+                    const ext = path.extname(file).toLowerCase();
+                    if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+                        const framePath = path.join(framesDir, file);
+                        const tempPath = framePath + '.tmp';
+                        await sharp(framePath)
+                            .resize(512, 320, { fit: 'fill' })
+                            .jpeg({ quality: 80 })
+                            .toFile(tempPath);
+                        await fs.unlink(framePath);
+                        await fs.rename(tempPath, framePath);
+                    }
+                }
+            } catch (frameErr: any) {
+                console.warn('[Worker] Frame compression failed:', frameErr.message);
+            }
+        }
+
+        // Package frames and frame_mapping.json directly into an in-memory base64 ZIP payload
+        const zip = new AdmZip();
+        zip.addLocalFolder(framesDir);
+
+        const mappingPath = path.join(jobDir, 'frame_mapping.json');
+        if (fsSync.existsSync(mappingPath)) {
+            zip.addLocalFile(mappingPath);
+        }
+
+        const zipBuffer = zip.toBuffer();
+        const lineartZipB64 = zipBuffer.toString('base64');
+
+        const refBuffer = await fs.readFile(refImagePath);
+        const refImageB64 = refBuffer.toString('base64');
+
+        const runpodApiKey = process.env.RUNPOD_API_KEY;
+        const runpodEndpointId = process.env.RUNPOD_ENDPOINT_ID;
+
+        if (!runpodApiKey || !runpodEndpointId) {
+            throw new Error('RUNPOD_API_KEY or RUNPOD_ENDPOINT_ID environment variables are missing.');
+        }
+
+        const response = await fetch(`https://api.runpod.ai/v2/${runpodEndpointId}/run`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${runpodApiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                input: {
+                    lineart_zip_b64: lineartZipB64,
+                    ref_image_b64: refImageB64,
+                    start_frame: 0,
+                    num_frames: 49,
+                    width: 512,
+                    height: 320,
+                    output_fps: 24,
+                    guidance_scale: 6.0,
+                    inference_steps: 50
+                }
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`RunPod Ingestion returned status: ${response.status}`);
+        }
+
+        const runpodData: any = await response.json();
+        const runpodJobId = runpodData.id;
+
+        if (!runpodJobId) {
+            throw new Error('Failed to retrieve runpod_job_id from serverless dispatcher.');
+        }
+
+        await pool.query(
+            `UPDATE jobs SET runpod_job_id = $1 WHERE id = $2;`,
+            [runpodJobId, job.id]
+        );
+
+        console.log(`[Worker] Job ${job.id} dispatched to RunPod Cloud successfully. RunPod ID: ${runpodJobId}`);
+
+    } catch (error: any) {
+        console.error(`[Worker] Failed dispatching job ${job.id} to RunPod:`, error.message);
+        await finalizeFailure(job.id, job.profile_id, job.job_cost, `Cloud Dispatch Failure: ${error?.message}`);
+        await cleanUpJobDirectory(jobDir);
+    }
+}
+
+/**
+ * Periodically polls RunPod Serverless API status for all active jobs.
+ * Restores colorized frames to original dimensions on completion [1].
+ */
+async function pollActiveRunPodJobs() {
+    const query = `
+        SELECT id, profile_id, input_path, job_cost, runpod_job_id, started_at
+        FROM jobs
+        WHERE status IN ('initiated', 'processing') AND runpod_job_id IS NOT NULL;
+    `;
+    const result = await pool.query(query);
+    const activeJobs = result.rows;
+
+    for (const job of activeJobs) {
+        const runpodJobId = job.runpod_job_id;
+        const runpodApiKey = process.env.RUNPOD_API_KEY;
+        const runpodEndpointId = process.env.RUNPOD_ENDPOINT_ID;
+
+        if (!runpodApiKey || !runpodEndpointId) {
+            console.error('[Worker] RUNPOD_API_KEY or RUNPOD_ENDPOINT_ID is missing from env variables!');
+            continue;
+        }
+
+        try {
+            const statusUrl = `https://api.runpod.ai/v2/${runpodEndpointId}/status/${runpodJobId}`;
+            const response = await fetch(statusUrl, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${runpodApiKey}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                console.warn(`[Worker] RunPod status query for job ${job.id} returned status: ${response.status}`);
+                continue;
+            }
+
+            const data: any = await response.json();
+            const status = data.status;
+
+            if (status === 'COMPLETED') {
+                const elapsedMs = Date.now() - new Date(job.started_at).getTime();
+                
+                const runpodResult = data.output; 
+                const innerOutput = runpodResult?.output; 
+                const zipBase64 = innerOutput?.zip_base64;
+
+                if (runpodResult && runpodResult.status === 'success' && zipBase64) {
+                    const rawZipBytes = Buffer.from(zipBase64, 'base64');
+                    
+                    // Retrieve cached original canvas dimensions [1]
+                    let origWidth = 512;
+                    let origHeight = 320;
+                    const metaPath = path.join(job.input_path, 'original_meta.json');
+                    if (fsSync.existsSync(metaPath)) {
+                        try {
+                            const metaData = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+                            origWidth = metaData.origWidth;
+                            origHeight = metaData.origHeight;
+                        } catch (e) {}
+                    }
+
+                    // ─── DECOMPRESSION & HIGH-QUALITY RESTORATION [1] ───
+                    console.log(`[Worker] Restoring completed frames to source dimensions: ${origWidth}x${origHeight}...`);
+                    
+                    const tempExtractDir = path.join(job.input_path, 'runpod_output_extract');
+                    await fs.mkdir(tempExtractDir, { recursive: true });
+
+                    const rawZip = new AdmZip(rawZipBytes);
+                    rawZip.extractAllTo(tempExtractDir, true);
+
+                    // Resize each frame sequentially using the premium Lanczos-3 kernel [1]
+                    const extractedFiles = await fs.readdir(tempExtractDir);
+                    for (const file of extractedFiles) {
+                        const ext = path.extname(file).toLowerCase();
+                        if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+                            const filePath = path.join(tempExtractDir, file);
+                            const tempPath = filePath + '.tmp';
+                            await sharp(filePath)
+                                .resize(origWidth, origHeight, { kernel: 'lanczos3', fit: 'fill' })
+                                .png({ compressionLevel: 9 }) // Keeps output pristine [1]
+                                .toFile(tempPath);
+                            await fs.unlink(filePath);
+                            await fs.rename(tempPath, filePath);
+                        }
+                    }
+
+                    // Package upscaled frames back into final colorized_sequence.zip
+                    const finalZip = new AdmZip();
+                    finalZip.addLocalFolder(tempExtractDir);
+                    const finalZipBuffer = finalZip.toBuffer();
+
+                    const zipFileLocation = path.join(job.input_path, 'colorized_sequence.zip');
+                    await fs.writeFile(zipFileLocation, finalZipBuffer);
+
+                    // Clean temporary upscaling folders
+                    await fs.rm(tempExtractDir, { recursive: true, force: true }).catch(() => {});
+
+                    const relativeZipDownloadPath = `/downloads/${job.id}/colorized_sequence.zip`;
+                    await finalizeSuccess(
+                        job.id,
+                        job.profile_id,
+                        job.job_cost,
+                        relativeZipDownloadPath,
+                        elapsedMs
+                    );
+
+                    // Privacy purge: Delete transient frames directory
+                    const framesDir = path.join(job.input_path, 'frames');
+                    await fs.rm(framesDir, { recursive: true, force: true }).catch(() => {});
+                } else {
+                    const failReason = innerOutput?.message || runpodResult?.message || 'RunPod completed but did not return a valid Base64 ZIP payload.';
+                    await finalizeFailure(job.id, job.profile_id, job.job_cost, failReason);
+                    await cleanUpJobDirectory(job.input_path);
+                }
+            }
+            else if (status === 'FAILED') {
+                const errorMsg = data.output?.error || 'RunPod serverless container execution failed.';
+                await finalizeFailure(job.id, job.profile_id, job.job_cost, errorMsg);
+                await cleanUpJobDirectory(job.input_path);
+            } 
+            else if (status === 'CANCELLED') {
+                await finalizeRunPodCancellation(job.id, job.profile_id, job.job_cost);
+                await cleanUpJobDirectory(job.input_path);
+            }
+            else if (status === 'IN_PROGRESS') {
+                await pool.query(
+                    `UPDATE jobs SET status = 'processing' WHERE id = $1 AND status = 'initiated';`,
+                    [job.id]
+                );
+            }
+        } catch (err: any) {
+            console.error(`[Worker] Error polling RunPod job ${job.id}:`, err.message);
+        }
     }
 }
 
@@ -160,7 +400,6 @@ async function finalizeSuccess(
             let newSubscriptionCredits = subscription_credits || 0;
             let newPurchasedCredits = purchased_credits || 0;
 
-            // FIFO Deduction: subscription first
             if (newSubscriptionCredits >= remainingCost) {
                 newSubscriptionCredits -= remainingCost;
                 remainingCost = 0;
@@ -273,252 +512,59 @@ async function finalizeFailure(
 }
 
 /**
- * Execution thread mapping and Python process spawning logic.
+ * Reverts credit reservations specifically if a RunPod cloud-side cancellation occurred [1].
  */
-async function processJob(job: any) {
-    const startTimestamp = Date.now();
-    const jobDir         = job.input_path;
-    const framesDir      = path.join(jobDir, 'frames');
-    const outputDir      = path.join(jobDir, 'output');
-    const zipFileLocation = path.join(jobDir, 'colorized_sequence.zip');
-
-    console.log('\n======================================================================');
-    console.log(`[Worker] Job ID ${job.id} - INITIATED EXECUTION PIPELINE`);
-    console.log(`[Worker] Temporary Workspace : ${jobDir}`);
-    console.log(`[Worker] Target Venv         : ${PYTHON_PATH}`);
-    console.log(`[Worker] Inference Script    : ${MODEL_SCRIPT}`);
-    console.log('======================================================================\n');
-
-    // Dynamically resolve reference image
-    let refImageName = 'reference.png';
+async function finalizeRunPodCancellation(
+    jobId: string,
+    profileId: string,
+    cost: number
+) {
+    const client = await pool.connect();
     try {
-        const filesInDir = await fs.readdir(jobDir);
-        const refFile = filesInDir.find(f => f.startsWith('reference.'));
-        if (refFile) refImageName = refFile;
-    } catch (err) {
-        console.warn('[Worker] Directory read warning while locating reference image:', err);
-    }
-    const refImagePath = path.join(jobDir, refImageName);
+        await client.query('BEGIN');
 
-    try {
-        // Guard against race conditions with cancelled jobs
-        const updateResult = await pool.query(
-            `UPDATE jobs SET status = 'processing' WHERE id = $1 AND status = 'initiated' RETURNING status;`,
-            [job.id]
+        await client.query(
+            `UPDATE jobs SET status = 'cancelled', completed_at = NOW() WHERE id = $1;`,
+            [jobId]
         );
 
-        if (updateResult.rowCount === 0) {
-            console.log(`[Worker] Job ${job.id} status changed before execution (possibly cancelled). Aborting.`);
-            return;
-        }
-
-        await fs.mkdir(outputDir, { recursive: true });
-
-        // ─── BUILD SPAWN ARGS ─────────────────────────────────────────────────
-        let spawnArgs: string[] = [];
-        const isLocalMode = true;
-
-        if (isLocalMode) {
-            spawnArgs = [
-                MODEL_SCRIPT,
-                '--base_path', SUBMODULE_DIR,
-                '--lineart_dir', framesDir,
-                '--ref_image',   refImagePath,
-                '--output_dir',  outputDir,
-                '--output_fps',  '24'
-            ];
-        } else {
-            const jsonConfigPath = path.join(jobDir, 'job_config.json');
-            spawnArgs = [MODEL_SCRIPT, '--config', jsonConfigPath];
-        }
-
-        // ─── PRE-FLIGHT GPU CHECK ─────────────────────────────────────────────
-        console.log(`[Worker] Pre-flight GPU check...`);
-        const gpuMem = checkGPUMemory();
-
-        if (gpuMem) {
-            const freeGB  = gpuMem.free  / 1024;
-            const totalGB = gpuMem.total / 1024;
-            console.log(`[Worker] GPU Memory: ${freeGB.toFixed(2)} GB free / ${totalGB.toFixed(2)} GB total`);
-
-            if (freeGB < 6.0) {
-                const errorMsg = (
-                    `Insufficient GPU memory: ${freeGB.toFixed(2)} GB free (need at least 6 GB). ` +
-                    `Close other GPU applications and try again.`
-                );
-                console.error(`[Worker] ${errorMsg}`);
-                await finalizeFailure(job.id, job.profile_id, job.job_cost, errorMsg);
-                await cleanUpJobDirectory(jobDir);
-                console.log('======================================================================\n');
-                return;
-            }
-        } else {
-            console.warn(`[Worker] Could not verify VRAM — proceeding with caution`);
-        }
-
-        // ─── SPAWN PYTHON SUBPROCESS ──────────────────────────────────────────
-        // PYTHON_ENV forces UTF-8 encoding on stdout/stderr to prevent
-        // UnicodeEncodeError on Windows CP1252 terminals when Python prints
-        // any non-ASCII character (e.g. progress indicators, box-drawing chars).
-        console.log(`[Worker] Spawning Python process...`);
-        console.log(`[Worker] Encoding: PYTHONIOENCODING=${PYTHON_ENV.PYTHONIOENCODING}, PYTHONUTF8=${PYTHON_ENV.PYTHONUTF8}`);
-
-        const pythonProcess = spawn(PYTHON_PATH, spawnArgs, {
-            cwd: SUBMODULE_DIR,
-            env: PYTHON_ENV,        // ← FIXED: was { ...process.env } which inherited CP1252
-            windowsHide: true
-        });
-
-        activeProcesses.set(job.id, pythonProcess);
-
-        let stdoutLog        = '';
-        let stderrLog        = '';
-        let lastProgressLine = '';
-
-        // ─── STDOUT HANDLER ───────────────────────────────────────────────────
-        pythonProcess.stdout.on('data', (data: Buffer) => {
-            // Decode buffer explicitly as UTF-8 — do NOT use .toString() without
-            // specifying encoding, as it defaults to the system locale on Windows.
-            const chunk = data.toString('utf8');
-            stdoutLog += chunk;
-
-            const lines = chunk.split('\n').filter((l: string) => l.trim());
-            if (lines.length > 0) {
-                lastProgressLine = lines[lines.length - 1];
-            }
-
-            process.stdout.write(`[Python stdout] ${chunk}`);
-        });
-
-        // ─── STDERR HANDLER ───────────────────────────────────────────────────
-        pythonProcess.stderr.on('data', (data: Buffer) => {
-            // Same explicit UTF-8 decode for stderr — protects against
-            // Python warning/traceback lines containing Unicode characters.
-            const chunk = data.toString('utf8');
-            stderrLog += chunk;
-
-            if (
-                !chunk.includes('vit_huge_patch16_224') &&
-                !chunk.includes('No pretrained configuration')
-            ) {
-                process.stderr.write(`[Python stderr] ${chunk}`);
-            }
-        });
-
-        // ─── PROCESS EXIT HANDLER ─────────────────────────────────────────────
-        pythonProcess.on('close', async (code: number | null) => {
-            const elapsedMs = Date.now() - startTimestamp;
-
-            // Check if job was cancelled mid-execution
-            const statusCheck = await pool.query(
-                `SELECT status FROM jobs WHERE id = $1;`,
-                [job.id]
-            );
-            const currentDbStatus = statusCheck.rows[0]?.status;
-
-            if (currentDbStatus === 'cancelled') {
-                console.log(`[Worker] Job ${job.id} was cancelled. Skipping post-processing.`);
-                activeProcesses.delete(job.id);
-                return;
-            }
-
-            activeProcesses.delete(job.id);
-
-            console.log(`\n${'='.repeat(70)}`);
-            console.log(`[Worker] Python Process closed with exit code: ${code}`);
-
-            // ─── CRASH DETECTION (Windows-specific exit codes) ────────────────
-            const isFatalCrash = code !== null && (
-                code === 3221226505 ||   // STATUS_STACK_BUFFER_OVERRUN
-                code === 3221225477 ||   // STATUS_ACCESS_VIOLATION
-                code === 3221225725 ||   // STATUS_DLL_NOT_FOUND
-                code === -1073741819     // STATUS_ACCESS_VIOLATION (signed)
-            );
-
-            if (isFatalCrash) {
-                let crashReason = 'Unknown GPU/driver crash';
-
-                if (code === 3221226505 || code === -1073741819) {
-                    crashReason = 'GPU driver crash (memory corruption or CUDA version mismatch)';
-                } else if (code === 3221225725) {
-                    crashReason = 'Missing system DLL (CUDA toolkit or Visual C++ runtime)';
-                }
-
-                const diagnostics = [
-                    `Exit code     : ${code} (0x${(code >>> 0).toString(16).toUpperCase()})`,
-                    `Last progress : ${lastProgressLine || 'Crashed before any output'}`,
-                    `Stderr        : ${stderrLog.substring(0, 500)}`,
-                    `Free RAM      : ${(os.freemem() / (1024 ** 3)).toFixed(2)} GB`
-                ].join('\n   ');
-
-                const errorMsg = (
-                    `${crashReason}\n\nDiagnostics:\n   ${diagnostics}\n\n` +
-                    `Actions:\n   1. Run: nvidia-smi\n   2. Restart the server\n   3. Update NVIDIA drivers`
-                );
-
-                console.error(`[Worker] FATAL CRASH DETECTED:\n${errorMsg}`);
-                await finalizeFailure(job.id, job.profile_id, job.job_cost, errorMsg);
-                await cleanUpJobDirectory(jobDir);
-                console.log(`${'='.repeat(70)}\n`);
-                return;
-            }
-
-            // ─── NORMAL PYTHON ERROR ──────────────────────────────────────────
-            if (code !== 0) {
-                const errorDetails = stderrLog || stdoutLog || `Python process failed with exit code ${code}`;
-                console.error(`[Worker] Job ${job.id} execution failed:`, errorDetails);
-                await finalizeFailure(job.id, job.profile_id, job.job_cost, errorDetails);
-                await cleanUpJobDirectory(jobDir);
-                console.log(`${'='.repeat(70)}\n`);
-                return;
-            }
-
-            // ─── SUCCESS PATH ─────────────────────────────────────────────────
-            try {
-                console.log(`[Worker] Compiling outputs to zip...`);
-                await zipDirectory(outputDir, zipFileLocation);
-                console.log(`[Worker] Zip created: ${zipFileLocation}`);
-
-                const relativeZipDownloadPath = `/downloads/${job.id}/colorized_sequence.zip`;
-                await finalizeSuccess(
-                    job.id,
-                    job.profile_id,
-                    job.job_cost,
-                    relativeZipDownloadPath,
-                    elapsedMs
-                );
-
-                console.log(`[Worker] Privacy purge: deleting transient files...`);
-                await fs.rm(framesDir,    { recursive: true, force: true }).catch(() => {});
-                await fs.rm(outputDir,    { recursive: true, force: true }).catch(() => {});
-                await fs.rm(refImagePath, { force: true }).catch(() => {});
-
-                console.log(`[Worker] Job ${job.id} completed successfully.`);
-                console.log(`${'='.repeat(70)}\n`);
-
-            } catch (zipError: any) {
-                console.error(`[Worker] Zip creation failed:`, zipError);
-                await finalizeFailure(
-                    job.id,
-                    job.profile_id,
-                    job.job_cost,
-                    `Packaging failure: ${zipError?.message}`
-                );
-                await cleanUpJobDirectory(jobDir);
-                console.log(`${'='.repeat(70)}\n`);
-            }
-        });
-
-    } catch (error: any) {
-        console.error(`[Worker] Unexpected loop exception on job ${job.id}:`, error);
-        await finalizeFailure(
-            job.id,
-            job.profile_id,
-            job.job_cost,
-            error?.message || 'Unexpected worker exception'
+        const profileResult = await client.query(
+            `SELECT current_credit_balance, reserved_credits FROM profiles WHERE id = $1 FOR UPDATE;`,
+            [profileId]
         );
-        await cleanUpJobDirectory(jobDir);
-        console.log('======================================================================\n');
+
+        if (profileResult.rowCount != null && profileResult.rowCount > 0) {
+            const { current_credit_balance, reserved_credits } = profileResult.rows[0];
+            const newReserved = Math.max(0, reserved_credits - cost);
+
+            await client.query(
+                `UPDATE profiles SET reserved_credits = $1 WHERE id = $2;`,
+                [newReserved, profileId]
+            );
+
+            const finalAvailableBalance = current_credit_balance - newReserved;
+            await client.query(
+                `INSERT INTO credit_transactions 
+                     (profile_id, transaction_type, amount, balance_after, reference_job_id, notes)
+                 VALUES ($1, $2, $3, $4, $5, $6);`,
+                [
+                    profileId,
+                    'reservation_release',
+                    cost,
+                    finalAvailableBalance,
+                    jobId,
+                    `Released ${cost} reserved credits due to RunPod cloud cancellation`
+                ]
+            );
+        }
+
+        await client.query('COMMIT');
+        console.log(`[Worker] Job ${jobId} cancelled on RunPod. Reserved credits released.`);
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error(`[Worker] Failed finalizing cancellation release for job ${jobId}:`, error);
+    } finally {
+        client.release();
     }
 }
 
@@ -538,16 +584,26 @@ async function cleanUpJobDirectory(dirPath: string) {
  * Polling daemon initialization.
  */
 async function startWorker() {
-    console.log('[Worker] Daemon initialized. Listening for queued rendering jobs...');
+    console.log('[Worker] RunPod Serverless Daemon initialized...');
 
+    // Daemon Loop 1: Queued Job Dispatcher (Checks for "queued" and dispatches to RunPod)
     setInterval(async () => {
         try {
-            const job = await fetchAndLockJob();
+            const job = await fetchAndLockQueuedJob();
             if (job) {
-                await processJob(job);
+                await dispatchJobToRunPod(job);
             }
         } catch (err) {
-            console.error('[Worker] Unhandled loop error:', err);
+            console.error('[Worker Dispatcher Error]:', err);
+        }
+    }, DISPATCH_INTERVAL_MS);
+
+    // Daemon Loop 2: Active Job Poller (Checks active RunPod jobs and writes back outputs)
+    setInterval(async () => {
+        try {
+            await pollActiveRunPodJobs();
+        } catch (err) {
+            console.error('[Worker Poller Error]:', err);
         }
     }, POLL_INTERVAL_MS);
 }

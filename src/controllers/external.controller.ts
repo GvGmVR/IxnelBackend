@@ -1,14 +1,12 @@
-// src/controllers/external.controller.ts
 import { Request, Response } from 'express';
 import { pool } from '../config/db';
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
-import { activeProcesses } from '../utils/processManager'; //   Import the shared register
 
 const AdmZip = require('adm-zip') as any;
 
-// Define local interface to bypass global namespace dependency
+// Local interface definition to bypass global namespace discrepancies
 interface MulterFile {
   fieldname: string;
   originalname: string;
@@ -67,7 +65,7 @@ export const externalController = {
         return;
       }      
 
-      // 2. Load the ZIP file in-memory using adm-zip [1.1.4, 1.2.4]
+      // 2. Load the ZIP file in-memory using adm-zip [1.2.4]
       const zip = new AdmZip(frameZipFile.buffer);
       
       // Extract, filter, and sanitize the image entries inside the zip
@@ -79,7 +77,7 @@ export const externalController = {
       // Sort entries alphabetically to maintain perfect sequence order
       zipEntries.sort((a: any, b: any) => a.entryName.localeCompare(b.entryName));
 
-      // 2. Sliding Window Partitioning Math (Capped or Single-Pass routing) [1.2.4]
+      // Sliding Window Partitioning Math (Capped or Single-Pass routing) [1.2.4]
       const N = zipEntries.length;
       if (N === 0) {
         res.status(400).json({ success: false, error: 'No valid lineart frames found inside the uploaded ZIP.' });
@@ -90,7 +88,7 @@ export const externalController = {
       const chunks: { start: number; end: number }[] = [];
 
       if (jobStrategy === 'single' || N <= 24) {
-        // ⚠️ SINGLE PASS: Process the entire sequence as a single job chunk [1.2.4]
+        // SINGLE PASS: Process the entire sequence as a single job chunk [1.2.4]
         chunks.push({ start: 0, end: N - 1 });
       } else {
         // SLIDING WINDOW: Split into 24-frame overlapping segments
@@ -112,7 +110,7 @@ export const externalController = {
       try {
         await client.query('BEGIN');
 
-        // 4. Lock profile for balance validation (Aligned with active current_credit_balance column)
+        // Lock profile for balance validation (Aligned with active current_credit_balance column)
         const profileResult = await client.query(
           `SELECT current_credit_balance, reserved_credits FROM profiles WHERE id = $1 FOR UPDATE;`,
           [profile_id as string]
@@ -139,10 +137,10 @@ export const externalController = {
         const queuedJobs: any[] = [];
         let runningReservedCredits = reserved_credits;
 
-        // Dynamic client type resolution: Reads from the incoming payload, defaults to 'external' if omitted [1.2.4]
+        // Dynamic client type resolution: Reads from incoming payload, defaults to 'external'
         const clientType = req.body.clientType || 'external';
 
-        // 5. Generate Directories and Queue DB Records for each Chunk
+        // 3. Generate Directories and Queue DB Records for each Chunk
         for (let idx = 0; idx < K; idx++) {
           const chunk = chunks[idx];
           const jobId = crypto.randomUUID();
@@ -216,7 +214,7 @@ export const externalController = {
           );
         }
 
-        // 6. Save final reservation count
+        // 4. Save final reservation count
         await client.query(
           `UPDATE profiles SET reserved_credits = $1 WHERE id = $2;`,
           [runningReservedCredits, profile_id as string]
@@ -226,7 +224,7 @@ export const externalController = {
 
         const newJob = queuedJobs[0];
 
-        // 7. Return response containing both the primary job ID and the full batch array
+        // 5. Return response containing both the primary job ID and the full batch array
         res.status(201).json({
           success: true,
           id: newJob.id,
@@ -276,7 +274,6 @@ export const externalController = {
 
       const job = result.rows[0];
 
-      // Flattened response structure so third-party clients can read properties directly
       res.status(200).json({
         success: true,
         id: job.id,
@@ -292,9 +289,9 @@ export const externalController = {
     }
   },
 
-/**
+  /**
    * Cancels a queued or active processing job externally.
-   * Kills running threads and enforces credit deductions on active jobs.
+   * Kills remote RunPod serverless worker threads and enforces credit deductions on active jobs [1].
    * PATCH /api/v1/external/jobs/:id/cancel
    */
   cancelExternalJob: async (req: Request, res: Response): Promise<void> => {
@@ -308,7 +305,7 @@ export const externalController = {
 
       // 1. Fetch job with lock to prevent concurrency issues
       const jobResult = await client.query(
-        `SELECT id, status, job_cost FROM jobs WHERE id = $1 AND profile_id = $2 FOR UPDATE;`,
+        `SELECT id, status, job_cost, runpod_job_id FROM jobs WHERE id = $1 AND profile_id = $2 FOR UPDATE;`,
         [jobId, profile_id as string]
       );
 
@@ -328,19 +325,40 @@ export const externalController = {
       }
 
       // 2. Update job status to 'cancelled' in database
-      // 2. Update job status to 'cancelled' in database
       await client.query(
         `UPDATE jobs SET status = 'cancelled', completed_at = NOW() WHERE id = $1;`,
         [jobId]
       );
 
-      // ⚠️ MODIFICATION: Resolve physical process existence to check compute footprint before assessing refunds
-      const proc = activeProcesses.get(jobId);
-      
-      // Eligible for a full refund if queued, or if initiated but process execution had not physically started
-      const isEligibleForRefund = job.status === 'queued' || (job.status === 'initiated' && !proc);
+      // Trigger RunPod Remote Job Cancellation if a cloud instance is running [1]
+      const runpodJobId = job.runpod_job_id;
+      const runpodApiKey = process.env.RUNPOD_API_KEY;
+      const runpodEndpointId = process.env.RUNPOD_ENDPOINT_ID;
 
-      // 3. Process cancellation logic based on verified physical compute footprint
+      if (runpodJobId && runpodApiKey && runpodEndpointId) {
+        try {
+          const cancelUrl = `https://api.runpod.ai/v2/${runpodEndpointId}/cancel/${runpodJobId}`;
+          const cancelRes = await fetch(cancelUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${runpodApiKey}`,
+              'Content-Type': 'application/json'
+            }
+          });
+          if (cancelRes.ok) {
+            console.log(`[cancelExternalJob] Successfully cancelled RunPod job ${runpodJobId} on cloud.`);
+          } else {
+            console.warn(`[cancelExternalJob] RunPod cancellation returned status: ${cancelRes.status}`);
+          }
+        } catch (runpodErr: any) {
+          console.error(`[cancelExternalJob] Failed to contact RunPod API for job ${runpodJobId}:`, runpodErr.message);
+        }
+      }
+
+      // Eligible for a full refund only if it was queued in PostgreSQL and not yet sent to RunPod [1]
+      const isEligibleForRefund = job.status === 'queued';
+
+      // 3. Process cancellation logic based on verified physical compute footprint [1]
       if (isEligibleForRefund) {
         // SCENARIO A: Release locked credits hold (Refund)
         const profileResult = await client.query(
@@ -375,18 +393,10 @@ export const externalController = {
         }
       } 
       else {
-        // SCENARIO B: Enforce credit deduction (No Refund) due to active GPU node usage
+        // SCENARIO B: Enforce credit deduction (No Refund) due to active GPU node usage [1]
         console.log(`[cancelExternalJob] Active cancellation requested for running job: ${jobId}`);
-        
-        // Locate and terminate the spawned OS child process in real-time
-        if (proc) {
-          proc.kill('SIGTERM'); // Send standard termination signal
-          activeProcesses.delete(jobId);
-          console.log(`[cancelExternalJob] Successfully terminated active Python process for job: ${jobId}`);
-        }
 
         // Deduct credits permanently since they consumed GPU compute resources
-        // ⚠️ MODIFICATION: Select subscription_credits and purchased_credits to prevent FIFO column drift
         const profileResult = await client.query(
           `SELECT current_credit_balance, reserved_credits, subscription_credits, purchased_credits, total_credits_used 
            FROM profiles 
@@ -407,7 +417,7 @@ export const externalController = {
           let newSubscriptionCredits = subscription_credits || 0;
           let newPurchasedCredits = purchased_credits || 0;
 
-          // ⚠️ MODIFICATION: Implement identical FIFO deduction to align with colorization_worker.ts
+          // Implement identical FIFO deduction
           if (newSubscriptionCredits >= remainingCost) {
             newSubscriptionCredits -= remainingCost;
             remainingCost = 0;
@@ -424,7 +434,7 @@ export const externalController = {
           const newReserved = Math.max(0, reserved_credits - job.job_cost);
           const newTotalUsed = (total_credits_used || 0) + job.job_cost;
 
-          // ⚠️ MODIFICATION: Synchronize all columns to keep database balance structure coherent
+          // Synchronize all columns to keep database balance structure coherent [1]
           await client.query(
             `UPDATE profiles 
              SET 
@@ -516,8 +526,6 @@ export const externalController = {
   getMyJobs: async (req: Request, res: Response): Promise<void> => {
     try {
       const { profile_id } = req.user!;
-      
-      // Reads from query string, defaults to 'external'
       const clientType = req.query.clientType as string || 'external';
       
       const query = `
@@ -538,13 +546,12 @@ export const externalController = {
     }
   },
 
-   // ⚠️ MODIFICATION: Clean workspace mechanism to delete failed or cancelled job folders and database records
+   // Clean workspace mechanism to delete failed or cancelled job folders and database records
   clearUnsuccessfulJobs: async (req: Request, res: Response): Promise<void> => {
     try {
       const { profile_id } = req.user!;
       const clientType = req.query.clientType as string || 'external';
 
-      // 1. Fetch directories of failed/cancelled jobs for the profile to prevent orphaned files
       const selectQuery = `
         SELECT id, input_path 
         FROM jobs 
@@ -553,7 +560,6 @@ export const externalController = {
       const result = await pool.query(selectQuery, [profile_id as string, clientType]);
       const jobsToClear = result.rows;
 
-      // 2. Perform direct disk cleanup on server workspace
       for (const job of jobsToClear) {
         if (job.input_path) {
           try {
@@ -565,7 +571,6 @@ export const externalController = {
         }
       }
 
-      // 3. Delete matching rows from database
       const deleteQuery = `
         DELETE FROM jobs 
         WHERE profile_id = $1 AND status IN ('failed', 'cancelled') AND client_type = $2;
@@ -584,11 +589,11 @@ export const externalController = {
   },
 
   /**
- * Permanently deletes a single job record and its disk workspace.
- * Only completed, failed, or cancelled jobs can be deleted this way.
- * DELETE /api/v1/external/jobs/:id
- */
-deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
+   * Permanently deletes a single job record and its disk workspace.
+   * Only completed, failed, or cancelled jobs can be deleted this way.
+   * DELETE /api/v1/external/jobs/:id
+   */
+  deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
     const { profile_id } = req.user!;
     const jobId = req.params.id as string;
 
@@ -597,7 +602,6 @@ deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
     try {
         await client.query('BEGIN');
 
-        // Fetch job with ownership check and lock
         const jobResult = await client.query(
             `SELECT id, status, input_path, job_cost FROM jobs 
              WHERE id = $1 AND profile_id = $2 FOR UPDATE;`,
@@ -612,7 +616,6 @@ deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
 
         const job = jobResult.rows[0];
 
-        // Block deletion of jobs that are still active — must cancel first
         if (['queued', 'initiated', 'processing'].includes(job.status)) {
             await client.query('ROLLBACK');
             res.status(400).json({
@@ -622,18 +625,15 @@ deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        // Clean up disk workspace
         if (job.input_path) {
             try {
                 await fs.rm(job.input_path, { recursive: true, force: true });
                 console.log(`[deleteExternalJob] Disk workspace purged: ${job.input_path}`);
             } catch (rmErr) {
                 console.warn(`[deleteExternalJob] Disk cleanup warning for ${job.input_path}:`, rmErr);
-                // Non-fatal — continue with DB deletion
             }
         }
 
-        // Delete the job record
         await client.query(
             `DELETE FROM jobs WHERE id = $1 AND profile_id = $2;`,
             [jobId, profile_id as string]
@@ -653,5 +653,5 @@ deleteExternalJob: async (req: Request, res: Response): Promise<void> => {
     } finally {
         client.release();
     }
-},
+  },
 };

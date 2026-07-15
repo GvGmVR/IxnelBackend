@@ -5,20 +5,34 @@ import { webhookRepository } from '../repositories/webhook.repository';
 import { paymentRepository } from '../repositories/payment.repository';
 import { subscriptionRepository } from '../repositories/subscription.repository';
 
-// Safely sanitizes and strips any accidental quotes/whitespace from environment keys [1.2.4]
-const proMonthlyId = (process.env.PADDLE_PRICE_ID_PRO_MONTHLY || '').replace(/['"]/g, '').trim();
-const proYearlyId = (process.env.PADDLE_PRICE_ID_PRO_YEARLY || '').replace(/['"]/g, '').trim();
-const credits50Id = (process.env.PADDLE_PRICE_ID_CREDITS_50 || '').replace(/['"]/g, '').trim();
+// ─── SUBSCRIPTION PRICE IDS ───
+const soloMonthlyId = (process.env.PADDLE_PRICE_ID_SOLO_MONTHLY || '').replace(/['"]/g, '').trim();
+const soloYearlyId = (process.env.PADDLE_PRICE_ID_SOLO_YEARLY || '').replace(/['"]/g, '').trim();
+const studioMonthlyId = (process.env.PADDLE_PRICE_ID_STUDIO_MONTHLY || '').replace(/['"]/g, '').trim();
+const studioYearlyId = (process.env.PADDLE_PRICE_ID_STUDIO_YEARLY || '').replace(/['"]/g, '').trim();
 
-// Price-to-Credit Mapping (One-time topups)
+// ─── PREPAID CREDIT PACK PRICE IDS ───
+const pack750Id = (process.env.PADDLE_PRICE_ID_PACK_750 || '').replace(/['"]/g, '').trim();
+const pack2000Id = (process.env.PADDLE_PRICE_ID_PACK_2000 || '').replace(/['"]/g, '').trim();
+const pack5000Id = (process.env.PADDLE_PRICE_ID_PACK_5000 || '').replace(/['"]/g, '').trim();
+const pack12000Id = (process.env.PADDLE_PRICE_ID_PACK_12000 || '').replace(/['"]/g, '').trim();
+
+// ─── MAPPINGS ───
+
+// Prepaid Packs: Maps the price ID to the exact amount of non-expiring purchased_credits to add
 const PRICE_TO_CREDITS_MAP: Record<string, number> = {
-  [credits50Id]: 50,
+  [pack750Id]: 750,
+  [pack2000Id]: 2000,
+  [pack5000Id]: 5000,
+  [pack12000Id]: 12000,
 };
 
-// Subscription Allowance Mapping (Pro monthly and annual plan price IDs)
+// Subscription Plans: Maps the price ID to the exact monthly subscription_credits allowance to grant
 const SUB_PLAN_ALLOWANCE_MAP: Record<string, number> = {
-  [proMonthlyId]: 500,
-  [proYearlyId]: 500,
+  [soloMonthlyId]: 1500,
+  [soloYearlyId]: 1500,
+  [studioMonthlyId]: 6000,
+  [studioYearlyId]: 6000,
 };
 
 export const paymentService = {
@@ -191,7 +205,7 @@ export const paymentService = {
           cancel_at_period_end: cancelAtPeriodEnd
         }, dbClient);
 
-        if (['active', 'trialing'].includes(status)) {
+        if (eventType === 'subscription.created'&& ['active', 'trialing'].includes(status)) {
           const monthlyAllowance = SUB_PLAN_ALLOWANCE_MAP[planCode];
           
           console.log('[DEBUG] Checking Plan Allowance Award:', { planCode, monthlyAllowance });
